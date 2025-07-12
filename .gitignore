@@ -171,6 +171,4 @@ cython_debug/
 .pypirc
 
 # data folder
-#data/
-*.json
-.idea
+data/
