@@ -4,7 +4,7 @@ This is the public release version of the code and examples related to the paper
 
 ## Overview
 
-MSTML provides a scalable method for predicting collaborative behaviors using textual data and probabilistic information geometry of author-topical interests. It combines a relational topic modeling (RTM) approach with time alignment and multiscale learning. The framework combines:
+MSTML provides a scalable method for predicting collaborative behaviors using textual data and probabilistic information geometry of author-topic interests. It combines a relational topic modeling (RTM) approach with time alignment and multiscale learning. The framework combines:
 
 - **GDLTM**: Geometry-Driven Longitudinal Topic Model for analyzing topic evolution over time. This is based on the paper "A Geometry-Driven Longitudinal Topic Model" (Wang, Hougen, et. al.; Harvard Data Science Review, 2021).
 - **HRG**: Hierarchical Random Graph models for network structure analysis and link prediction. This is based on "Hierarchical structure and the prediction of missing links in networks" (Clauset, Moore, and Newman; Nature 453, 98-101, 2008)
