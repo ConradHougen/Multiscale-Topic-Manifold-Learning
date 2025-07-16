@@ -201,25 +201,25 @@ def run_build_verification():
     
     # Check if we're in the right directory
     if not os.path.exists("source/fast_encode_tree.pyx"):
-        print("❌ Error: fast_encode_tree.pyx not found")
+        print("Error: fast_encode_tree.pyx not found")
         print("Please run this script from the MSTML root directory")
         return False
     
     # Check if Cython module is compiled
     try:
-        import source.fast_encode_tree
-        print("✓ Cython module found and importable")
+        import mstml.fast_encode_tree
+        print("Cython module found and importable")
         
         # Check if it's actually compiled (has .so/.pyd file)
         import inspect
-        module_file = inspect.getfile(source.fast_encode_tree)
+        module_file = inspect.getfile(mstml.fast_encode_tree)
         if module_file.endswith(('.so', '.pyd')):
-            print(f"✓ Using compiled Cython module: {module_file}")
+            print(f"Using compiled Cython module: {module_file}")
         else:
-            print(f"⚠️  Using Python fallback: {module_file}")
+            print(f"Using Python fallback: {module_file}")
             
     except ImportError as e:
-        print(f"❌ Failed to import Cython module: {e}")
+        print(f"Failed to import Cython module: {e}")
         print("Please run: python setup.py build_ext --inplace")
         return False
     
@@ -230,10 +230,10 @@ def run_build_verification():
     result = runner.run(suite)
     
     if result.wasSuccessful():
-        print("✅ All tests passed!")
+        print("All tests passed!")
         return True
     else:
-        print(f"❌ {len(result.failures)} test(s) failed")
+        print(f"{len(result.failures)} test(s) failed")
         for test, traceback in result.failures:
             print(f"Failed: {test}")
             print(traceback)

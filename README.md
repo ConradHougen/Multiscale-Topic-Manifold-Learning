@@ -1,13 +1,13 @@
 # Multi-Scale Topic Manifold Learning (MSTML)
 
-This is the public release version of the code and examples related to the paper "Multi-Scale Topic Manifold Learning for Understanding Interdisciplinary Collaborations in Co-Author Networks".
+This is the public release version of the code and examples related to the papers: "Multi-Scale Topic Manifold Learning for Understanding Interdisciplinary Collaborations in Co-Author Networks" and "A Multiscale Geometric Method for Capturing Relational Topic Alignment".
 
 ## Overview
 
-MSTML provides a scalable method for predicting collaborative behaviors using textual data and probabilistic information geometry of author-topical interests. The framework combines:
+MSTML provides a scalable method for predicting collaborative behaviors using textual data and probabilistic information geometry of author-topical interests. It combines a relational topic modeling (RTM) approach with time alignment and multiscale learning. The framework combines:
 
-- **GDLTM**: Geometry-Driven Longitudinal Topic Model for analyzing topic evolution over time
-- **HRG**: Hierarchical Random Graph models for network structure analysis and link prediction
+- **GDLTM**: Geometry-Driven Longitudinal Topic Model for analyzing topic evolution over time. This is based on the paper "A Geometry-Driven Longitudinal Topic Model" (Wang, Hougen, et. al.; Harvard Data Science Review, 2021).
+- **HRG**: Hierarchical Random Graph models for network structure analysis and link prediction. This is based on "Hierarchical structure and the prediction of missing links in networks" (Clauset, Moore, and Newman; Nature 453, 98-101, 2008)
 - **Text Processing**: Comprehensive preprocessing utilities for academic documents
 - **Network Analysis**: Tools for analyzing collaboration patterns and community structure
 
@@ -15,86 +15,21 @@ MSTML provides a scalable method for predicting collaborative behaviors using te
 
 ### Quick Installation
 
-#### Windows (Recommended)
-```cmd
-git clone https://github.com/ConradHougen/Multi-Scale-Topic-Manifold-Learning.git
-cd Multi-Scale-Topic-Manifold-Learning
-
-# Double-click setup-dev.bat or run:
-setup-dev.bat
-
-# Or use the Python build script:
-python build.py dev
-```
+#### Windows
 
 #### Linux/macOS
-```bash
-git clone https://github.com/ConradHougen/Multi-Scale-Topic-Manifold-Learning.git
-cd Multi-Scale-Topic-Manifold-Learning
 
-# Using make (if available)
-make dev
-
-# Or using Python build script (works everywhere)
-python build.py dev
-```
-
-#### Manual Setup (All Platforms)
-```bash
-python setup_mstml.py
-pip install -r requirements.txt
-python setup.py build_ext --inplace
-```
-
-#### If You Get Build Errors
-If you encounter "Preparing metadata (pyproject.toml) ... error" or similar issues:
-
-```bash
-# Try the simple build method (recommended)
-python build_simple.py
-
-# Or install dependencies first, then build
-pip install numpy cython setuptools
-python setup.py build_ext --inplace
-```
-
-For detailed troubleshooting, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ### Build Requirements
 - **Python 3.7+**
 - **C Compiler** (GCC, Clang, or MSVC)
 - **NumPy and Cython** (for compiling performance extensions)
 
-For detailed build instructions, see [BUILD.md](BUILD.md).
-
 ### Performance Note
 MSTML includes Cython extensions for optimal performance. The `fast_encode_tree` module provides 5-50x speedup for hierarchical operations. If compilation fails, the framework will fall back to pure Python implementations with a performance warning.
 
 ## Quick Start
 
-```python
-import sys
-sys.path.append('source')
-
-from source import Mstml, MstmlParams
-from source.gdltm import Gdltm, GdltmParams
-from source.hrg import HierarchicalRandomGraph
-from preprocessing.text_processing import create_academic_text_processor
-
-# Text processing
-processor = create_academic_text_processor()
-processed_docs = processor.process_documents(your_documents)
-
-# Topic modeling with GDLTM
-gdltm_params = GdltmParams(dset="your_dataset", dsub="subset", ntopics=10)
-gdltm = Gdltm(gdltm_params)
-gdltm.run_full_pipeline()
-
-# Network analysis with HRG
-hrg = HierarchicalRandomGraph(your_network)
-hrg.fit()
-predictions = hrg.predict_links()
-```
 
 ## Repository Structure
 
@@ -149,11 +84,10 @@ Multi-Scale-Topic-Manifold-Learning/
 See the `notebooks/` directory for comprehensive examples:
 
 - `01_basic_usage_example.ipynb`: Introduction to core functionality
-- Additional notebooks demonstrating specific use cases
 
 ## Data Format
 
-The framework expects preprocessed data in the following format:
+The framework creates preprocessed data in the following format:
 - `main_df.pkl`: Main dataframe with document metadata
 - `data_words.pkl`: Tokenized documents
 - `id2word.pkl`: Vocabulary mapping

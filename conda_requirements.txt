@@ -1,0 +1,16 @@
+python=3.10
+pip
+numpy
+pandas
+matplotlib
+networkx
+scipy
+scikit-learn
+gensim
+nltk
+cython
+setuptools
+wheel
+python-louvain
+notebook
+seaborn
