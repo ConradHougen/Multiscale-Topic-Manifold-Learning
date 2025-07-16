@@ -99,11 +99,16 @@ The framework creates preprocessed data in the following format:
 If you use this code in your research, please cite:
 
 ```bibtex
-@article{your_paper,
-  title={Multi-Scale Topic Manifold Learning for Understanding Interdisciplinary Collaborations in Co-Author Networks},
-  author={Your Authors},
-  journal={Your Journal},
-  year={2024}
+@unpublished{hougen2025mstml_camsap,
+  author  = {Conrad D. Hougen and Karl T. Pazdernik and Alfred O. Hero},
+  title   = {A Multiscale Geometric Method for Capturing Relational Topic Alignment},
+  note    = {Preprint}
+}
+
+@unpublished{hougen2025mstml,
+  author  = {Conrad D. Hougen and Karl T. Pazdernik and Alfred O. Hero},
+  title   = {Multi-Scale Topic Manifold Learning for Understanding Interdisciplinary Collaborations in Co-Author Networks},
+  note    = {Preprint}
 }
 ```
 
