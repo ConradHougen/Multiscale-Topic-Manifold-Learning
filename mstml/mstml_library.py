@@ -1,37 +1,7 @@
-from itertools import islice
-
 import numpy as np
 import pandas as pd
 import networkx as nx
-# Optional imports - framework works without these
-try:
-    import matplotlib.pyplot as plt
-    import matplotlib
-    from matplotlib import cm
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
-    plt = None
-    cm = None
-
-try:
-    import mplcursors
-    HAS_MPLCURSORS = True
-except ImportError:
-    HAS_MPLCURSORS = False
-
-try:
-    import hypernetx as hnx
-    HAS_HYPERNETX = True
-except ImportError:
-    HAS_HYPERNETX = False
-
-try:
-    import community as community_louvain  # For Louvain method
-    HAS_COMMUNITY = True
-except ImportError:
-    HAS_COMMUNITY = False
-
+import matplotlib.pyplot as plt
 import gensim.corpora as corpora
 import pickle
 import os
@@ -39,6 +9,12 @@ import re
 import glob
 import nltk
 import random
+import mplcursors
+import hypernetx as hnx
+import community as community_louvain  # For Louvain method
+
+from itertools import islice
+from matplotlib import cm
 from concurrent.futures import ThreadPoolExecutor
 from sklearn.metrics import adjusted_rand_score
 from sklearn.metrics import normalized_mutual_info_score
@@ -55,24 +31,11 @@ from enum import Enum, auto
 from gensim.models import AuthorTopicModel
 from scipy.stats import kendalltau
 from itertools import combinations
-
-# Try to import the compiled Cython module, fall back to Python implementation
-try:
-    from .fast_encode_tree import fast_encode_tree_structure, TreeNode
-except ImportError:
-    try:
-        from .__fast_encode_tree_fallback import fast_encode_tree_structure, TreeNode
-    except ImportError:
-        # If both fail, the original Python file should be available
-        import warnings
-        warnings.warn(
-            "Could not import fast_encode_tree module. "
-            "Please ensure the Cython extension is compiled or the Python fallback is available.",
-            ImportWarning
-        )
-        raise
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
+
+# Try to import the compiled Cython module, fall back to Python implementation
+from fast_encode_tree import fast_encode_tree_structure, TreeNode
 
 
 # Function that extracts 'text_processed' column per doc chunk

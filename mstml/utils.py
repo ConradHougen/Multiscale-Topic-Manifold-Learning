@@ -12,14 +12,7 @@ import pickle
 import os
 import re
 import glob
-
-# Optional imports - framework works without these
-try:
-    import matplotlib.pyplot as plt
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
-    plt = None
+import matplotlib.pyplot as plt
 import nltk
 import random
 import hashlib

@@ -10,6 +10,8 @@ import os
 
 def parse_requirements(filename):
     """Parse a pip requirements file into a list of install_requires."""
+    if not os.path.exists(filename):
+        return []
     with open(filename, "r") as f:
         lines = f.readlines()
     return [
@@ -21,8 +23,8 @@ def parse_requirements(filename):
 # Define the Cython extension
 extensions = [
     Extension(
-        name="mstml.fast_encode_tree",  # This is the import path
-        sources=["mstml/fast_encode_tree.pyx"],
+        name="mstml.fast_encode_tree.fast_encode_tree",  # Full path to Cython .pyx
+        sources=["mstml/fast_encode_tree/fast_encode_tree.pyx"],
         include_dirs=[np.get_include()],
         extra_compile_args=["-O3"],
     )

@@ -1,20 +1,8 @@
 import numpy as np
 import pandas as pd
 import networkx as nx
-
-# Optional imports - framework works without these
-try:
-    import matplotlib.pyplot as plt
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
-    plt = None
-
-try:
-    import hypernetx as hnx
-    HAS_HYPERNETX = True
-except ImportError:
-    HAS_HYPERNETX = False
+import matplotlib.pyplot as plt
+import hypernetx as hnx
 import gensim.corpora as corpora
 import pickle
 import os
@@ -39,11 +27,6 @@ from gensim.utils import simple_preprocess
 from enum import Enum, auto
 from gensim.models import AuthorTopicModel
 from PyPDF2 import PdfReader, PdfWriter
-
-nltk.download('wordnet')
-nltk.download('omw-1.4')
-nltk.download('stopwords')
-
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 

@@ -15,27 +15,10 @@ import numpy as np
 import gensim
 import nltk
 
-# Optional imports - framework works without these
-try:
-    import matplotlib as mpl
-    import matplotlib.pyplot as plt
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
-    mpl = None
-    plt = None
-
-try:
-    import phate
-    HAS_PHATE = True
-except ImportError:
-    HAS_PHATE = False
-
-try:
-    import pyLDAvis.gensim_models
-    HAS_PYLDAVIS = True
-except ImportError:
-    HAS_PYLDAVIS = False
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import phate
+import pyLDAvis.gensim_models
 import pyLDAvis
 import seaborn as sns
 import warnings

@@ -1,5 +1,5 @@
 """
 Core MSTML (Multi-Scale Topic Manifold Learning) functionality.
 
-This module contains the main classes and enums for the MSTML framework.
+This module contains the main types and functions for the MSTML framework.
 """

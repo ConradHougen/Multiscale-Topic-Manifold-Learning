@@ -175,3 +175,7 @@ data/
 
 # IDE folders
 .idea/
+
+# Specific exclusions for Cython build files after compilation
+mstml/fast_encode_tree/*.c
+mstml/fast_encode_tree/*.pyd
