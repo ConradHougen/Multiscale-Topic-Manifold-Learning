@@ -16,3 +16,4 @@ pyldavis
 hypernetx
 mplcursors
 phate
+sparse_dot_topn

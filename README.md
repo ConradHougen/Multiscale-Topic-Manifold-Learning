@@ -40,14 +40,13 @@ Multi-Scale-Topic-Manifold-Learning/
 │   ├── core.py            # Core MSTML classes and functionality
 │   ├── gdltm.py           # Geometry-Driven Longitudinal Topic Model
 │   ├── hrg.py             # Hierarchical Random Graph implementation
-│   └── utils.py           # Utility functions and helpers
-├── preprocessing/          # Data preprocessing utilities
-│   ├── __init__.py
+│   ├── utils.py           # Utility functions and helpers
 │   └── text_processing.py # Text processing and cleaning
 ├── notebooks/             # Example notebooks and tutorials
 │   └── 01_basic_usage_example.ipynb
 ├── data/                  # Data directory structure
 │   └── arxiv/            # Example dataset organization
+├── build.py              # Conda environment setup, build, and package installation
 ├── setup.py              # Package installation script
 ├── requirements.txt      # Python dependencies
 └── README.md            # This file
