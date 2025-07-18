@@ -15,11 +15,6 @@ from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from typing import List, Dict, Optional, Union
 
-# Download required NLTK data
-nltk.download('stopwords', quiet=True)
-nltk.download('wordnet', quiet=True)
-nltk.download('omw-1.4', quiet=True)
-
 
 class TextProcessor:
     """

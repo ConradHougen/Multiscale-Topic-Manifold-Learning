@@ -39,7 +39,7 @@ setup(
     include_package_data=True,
     ext_modules=cythonize(extensions, compiler_directives={"language_level": "3"}),
     zip_safe=False,
-    install_requires=parse_requirements("pip_requirements.txt"),
+    install_requires=parse_requirements("requirements.txt"),
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Cython",

@@ -1,9 +1,18 @@
 import numpy as np
 import random
 import re
+
+from collections import defaultdict
 from sklearn.feature_extraction.text import TfidfVectorizer
 from scipy.sparse import csr_matrix, find
 from sparse_dot_topn import awesome_cossim_topn
+
+class AuthorDisambiguator:
+    def __init__(self):
+        # Dictionaries for mapping author names to unique IDs
+        # One ID may be mapped to multiple author names
+        self.authorName_to_authorId = defaultdict(int)
+        self.authorId_to_authorName = defaultdict(list)
 
 
 # Takes a string that is a list of authors separated by a specific character

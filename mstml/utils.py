@@ -17,6 +17,7 @@ import nltk
 import random
 import hashlib
 import math
+import logging
 from scipy.spatial import KDTree
 from collections import Counter
 from math import factorial
@@ -26,11 +27,6 @@ from datetime import datetime
 from sklearn.cluster import AgglomerativeClustering
 from gensim.utils import simple_preprocess
 from enum import Enum, auto
-
-# Download required NLTK data
-nltk.download('wordnet', quiet=True)
-nltk.download('omw-1.4', quiet=True)
-nltk.download('stopwords', quiet=True)
 
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
@@ -49,6 +45,26 @@ class TopicRelevanceEnum(Enum):
     """Different methods for representing topics filtered by relevance."""
     N_HOT_ENCODING = auto()  # N nonzero entries for N most relevant terms
     VOCAB_MASK = auto()      # Masked to union of N most relevant terms per topic
+
+
+def log_print(message: str, level: str = "info", logger: logging.Logger = None, also_print: bool = True):
+    """
+    Logs and optionally prints a message.
+
+    Parameters:
+        message (str): The message to log/print.
+        level (str): Logging level: 'debug', 'info', 'warning', 'error', or 'critical'.
+        logger (logging.Logger): Logger instance. If None, uses root logger.
+        also_print (bool): Whether to also print to stdout.
+    """
+    if logger is None:
+        logger = logging.getLogger()
+
+    log_func = getattr(logger, level.lower(), logger.info)
+    log_func(message)
+
+    if also_print:
+        print(message)
 
 
 def get_data_int_dir(dset, dsub):

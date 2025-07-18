@@ -14,7 +14,7 @@ class MstmlBuilder:
         self.env_name = env_name
         self.has_conda = self._check_conda()
         self.conda_packages = self._load_requirements("conda_requirements.txt")
-        self.pip_requirements_file = "pip_requirements.txt"
+        self.pip_requirements_file = "requirements.txt"
 
         # Setup logging
         logging.basicConfig(
