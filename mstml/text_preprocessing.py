@@ -1,5 +1,5 @@
 """
-Text processing utilities for MSTML.
+Text preprocessing utilities for MSTML.
 
 This module provides comprehensive text preprocessing functionality
 including tokenization, cleaning, and preparation for topic modeling.
@@ -14,9 +14,10 @@ from gensim.utils import simple_preprocess
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from typing import List, Dict, Optional, Union
+from tqdm import tqdm
 
 
-class TextProcessor:
+class TextPreprocessor:
     """
     Comprehensive text processing class for academic documents.
     """
@@ -119,21 +120,21 @@ class TextProcessor:
         
         return tokens
     
-    def process_text(self, text: str) -> List[str]:
+    def preprocess_text(self, text: str) -> List[str]:
         """
-        Complete text processing pipeline.
+        Complete text preprocessing pipeline.
         
         Args:
             text: Raw text string
             
         Returns:
-            List of processed tokens
+            List of preprocessed tokens
         """
         cleaned_text = self.clean_text(text)
         tokens = self.tokenize(cleaned_text)
         return tokens
     
-    def process_documents(self, documents: List[str], show_progress=True) -> List[List[str]]:
+    def preprocess_documents(self, documents: List[str], show_progress=True) -> List[List[str]]:
         """
         Process multiple documents.
         
@@ -144,11 +145,10 @@ class TextProcessor:
         Returns:
             List of tokenized documents
         """
-        processed_docs = []
+        preprocessed_docs = []
         
         if show_progress:
             try:
-                from tqdm import tqdm
                 iterator = tqdm(documents, desc="Processing documents")
             except ImportError:
                 iterator = documents
@@ -157,21 +157,22 @@ class TextProcessor:
             iterator = documents
         
         for doc in iterator:
-            processed_docs.append(self.process_text(doc))
+            preprocessed_docs.append(self.preprocess_text(doc))
         
-        return processed_docs
+        return preprocessed_docs
     
     def filter_by_frequency(self, 
                           tokenized_docs: List[List[str]], 
-                          min_freq: int = 2, 
-                          max_freq_ratio: float = 0.8) -> List[List[str]]:
+                          min_freq: int = 1,
+                          max_freq_ratio: float = 0.995) -> List[List[str]]:
         """
         Filter tokens by document frequency.
+        Bounds for retained vocab are treated as exclusive (), not inclusive [].
         
         Args:
             tokenized_docs: List of tokenized documents
-            min_freq: Minimum frequency threshold
-            max_freq_ratio: Maximum frequency ratio (0-1)
+            min_freq: Minimum frequency threshold (excludes bound)
+            max_freq_ratio: Maximum frequency ratio (0-1) (excludes bound)
             
         Returns:
             Filtered tokenized documents
@@ -189,7 +190,7 @@ class TextProcessor:
         # Filter tokens
         valid_tokens = set()
         for token, freq in doc_freq.items():
-            if min_freq <= freq <= max_freq:
+            if min_freq < freq < max_freq:
                 valid_tokens.add(token)
         
         # Apply filter to documents
@@ -222,7 +223,7 @@ class TextProcessor:
     
     def get_statistics(self, tokenized_docs: List[List[str]]) -> Dict:
         """
-        Get statistics about processed documents.
+        Get statistics about preprocessed documents.
         
         Args:
             tokenized_docs: List of tokenized documents
@@ -299,12 +300,12 @@ class TextProcessor:
         return [doc for doc in tokenized_docs if len(doc) >= min_length]
 
 
-def create_academic_text_processor():
+def create_academic_text_preprocessor():
     """
-    Create a text processor optimized for academic documents.
+    Create a text preprocessor optimized for academic documents.
     
     Returns:
-        TextProcessor configured for academic texts
+        TextPreprocessor configured for academic texts
     """
     # Academic-specific stopwords
     academic_stopwords = [
@@ -314,7 +315,7 @@ def create_academic_text_processor():
         'conference', 'proceedings', 'university', 'department', 'et', 'al'
     ]
     
-    return TextProcessor(
+    return TextPreprocessor(
         min_word_length=3,
         max_word_length=30,
         remove_numbers=True,

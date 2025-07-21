@@ -1,8 +1,16 @@
 """
-Utility functions for MSTML (Multi-Scale Topic Manifold Learning).
+Utility functions (generic)
 
-This module contains various utility functions for data processing, 
-mathematical operations, and file handling used throughout the MSTML framework.
+This module contains various utility functions that are general-purpose for:
+1. Managing file I/O
+2. Computing vector distances
+3. Logging information
+4. Managing networkx graphs
+5. Anything that is not specific to the MSTML framework.
+
+For utility functions or classes specific to MSTML or GDLTM, see:
+1. mstml_utils.py
+2. gdtlm_utils.py
 """
 
 import numpy as np
@@ -50,7 +58,7 @@ class TopicRelevanceEnum(Enum):
 def log_print(message: str, level: str = "info", logger: logging.Logger = None, also_print: bool = True):
     """
     Logs and optionally prints a message.
-
+0
     Parameters:
         message (str): The message to log/print.
         level (str): Logging level: 'debug', 'info', 'warning', 'error', or 'critical'.

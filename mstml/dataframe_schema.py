@@ -1,5 +1,5 @@
 """
-schema.py
+dataframe_schema.py
 
 Defines the schema (column format) for the pandas dataframe used for cleaned
 text corpora.

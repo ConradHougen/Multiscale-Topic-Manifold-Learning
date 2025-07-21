@@ -19,3 +19,4 @@ phate
 sparse_dot_topn
 wordcloud
 PyPDF2
+tqdm

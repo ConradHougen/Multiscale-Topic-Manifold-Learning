@@ -13,9 +13,9 @@ import pandas.api.types as ptypes  # Allows O(1) check for datetime-like type
 from pathlib import Path
 from enum import Enum
 from abc import ABC, abstractmethod
-from text_processing import TextProcessor
+from text_preprocessing import TextPreprocessor
 from author_disambiguation import AuthorDisambiguator
-from schema import DataColumn, COLUMN_TYPES
+from dataframe_schema import DataColumn, COLUMN_TYPES
 from utils import log_print
 
 
@@ -23,6 +23,8 @@ def get_project_root():
     """
     Returns the root directory one level up from mstml directory
     """
+    # .parent gets directory containining this file
+    # .parent.parent gets parent dir of dir containing this file
     return Path(__file__).resolve().parent.parent
 
 
@@ -103,7 +105,7 @@ class DataLoader(ABC):
         Convert raw text corpus data into a DataFrame with standardized column
         format.
 
-        Preprocessing capabilities are implemented in text_processing.py
+        Preprocessing capabilities are implemented in text_preprocessing.py
 
         Should set self.df
         """
