@@ -1,25 +1,60 @@
 """
 dataframe_schema.py
 
-Defines the schema (column format) for the pandas dataframe used for cleaned
-text corpora.
+Defines schemas (column formats) for the pandas dataframes
 """
 
-import datetime as dt
 from enum import Enum
+from collections import namedtuple
+import datetime as dt
 
-class DataColumn(str, Enum):
-    """Defines the required and optional columns for the cleaned corpus df"""
-    RAW_TEXT = "raw_text"
-    TOKENIZED_TEXT = "tokenized_text"
-    DATE = "date"
-    AUTHOR_NAMES = "author_names"
-    AUTHOR_IDS = "author_ids"
+# Each schema column/field needs to defined in this format, with an extractor method
+# The extractor method should perform basic minimal processing of the field
+FieldDef = namedtuple("FieldDef", ["column_name", "extractor", "type"])
 
-COLUMN_TYPES = {
-    DataColumn.RAW_TEXT: str,
-    DataColumn.TOKENIZED_TEXT: list,
-    DataColumn.DATE: dt.date,
-    DataColumn.AUTHOR_NAMES: list,
-    DataColumn.AUTHOR_IDS: list,
-}
+class MainDataSchema(Enum):
+    """
+    Defines the schemas used in pandas dataframes after loading data
+    """
+    TITLE = FieldDef(
+        "title",
+        lambda entry: entry.get("title", "").strip(),
+        str
+    )
+    DATE = FieldDef(
+        "date",
+        lambda entry: (
+            dt.date.fromisoformat(entry["date"][:10]) if entry.get("date") else None
+        ),
+        dt.date
+    )
+    RAW_TEXT = FieldDef(
+        "raw_text",
+        lambda entry: entry.get("raw_text", "").strip(),
+        str
+    )
+    AUTHOR_NAMES = FieldDef(
+        "author_names",
+        lambda entry: [
+            a["name"] for a in entry.get("authors", [])
+            if isinstance(a, dict) and "name" in a
+        ],
+        list
+    )
+    AUTHOR_IDS = FieldDef("author_ids", lambda entry: None, list)
+    PREPROCESSED_TEXT = FieldDef("preprocessed_text", lambda entry: None, list)
+
+    @property
+    def colname(self):
+        return self.value.column_name
+
+    def get_extractor(self):
+        return self.value.extractor
+
+    @classmethod
+    def all_colnames(cls):
+        return [field.colname for field in cls]
+
+    @classmethod
+    def all_fields(cls):
+        return list(cls)

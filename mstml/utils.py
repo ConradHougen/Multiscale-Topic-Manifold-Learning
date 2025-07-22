@@ -55,10 +55,17 @@ class TopicRelevanceEnum(Enum):
     VOCAB_MASK = auto()      # Masked to union of N most relevant terms per topic
 
 
+def validate_dataset_name(name: str) -> bool:
+    if not re.fullmatch(r"[a-z_][a-z0-9_]*", name):
+        raise ValueError(
+            f"Invalid dataset name '{name}'. Must start with a letter or underscore and contain only lowercase letters, digits, and underscores."
+        )
+    return True
+
 def log_print(message: str, level: str = "info", logger: logging.Logger = None, also_print: bool = True):
     """
     Logs and optionally prints a message.
-0
+
     Parameters:
         message (str): The message to log/print.
         level (str): Logging level: 'debug', 'info', 'warning', 'error', or 'critical'.
