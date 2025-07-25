@@ -9,317 +9,169 @@ import re
 import nltk
 import pandas as pd
 import numpy as np
-from collections import Counter
+from collections import Counter, defaultdict
 from gensim.utils import simple_preprocess
+from gensim import corpora
+from gensim.models import LdaModel
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional
+from multiprocessing import Pool
 from tqdm import tqdm
 
 
+def super_simple_preprocess(text):
+    return simple_preprocess(str(text), deacc=True)
+
+
+def lemmatize_doc(doc):
+    lemmatizer = WordNetLemmatizer()
+    return [lemmatizer.lemmatize(token) for token in doc]
+
+
+def filter_doc_with_approved_tokens(doc, approved_tokens_set):
+    return [token for token in doc if token in approved_tokens_set]
+
+
 class TextPreprocessor:
-    """
-    Comprehensive text processing class for academic documents.
-    """
-    
-    def __init__(self, 
-                 language='english',
-                 min_word_length=2,
-                 max_word_length=50,
-                 remove_numbers=True,
-                 remove_stopwords=True,
-                 lemmatize=True,
-                 custom_stopwords=None):
-        """
-        Initialize text processor.
-        
-        Args:
-            language: Language for stopwords
-            min_word_length: Minimum word length to keep
-            max_word_length: Maximum word length to keep
-            remove_numbers: Whether to remove numeric tokens
-            remove_stopwords: Whether to remove stopwords
-            lemmatize: Whether to lemmatize words
-            custom_stopwords: Additional stopwords to remove
-        """
-        self.language = language
-        self.min_word_length = min_word_length
-        self.max_word_length = max_word_length
-        self.remove_numbers = remove_numbers
-        self.remove_stopwords = remove_stopwords
-        self.lemmatize = lemmatize
-        
-        # Initialize stopwords
-        if remove_stopwords:
-            self.stopwords = set(stopwords.words(language))
-            if custom_stopwords:
-                self.stopwords.update(custom_stopwords)
-        else:
-            self.stopwords = set()
-            
-        # Initialize lemmatizer
-        if lemmatize:
-            self.lemmatizer = WordNetLemmatizer()
-        else:
-            self.lemmatizer = None
-    
-    def clean_text(self, text: str) -> str:
-        """
-        Clean raw text by removing unwanted characters and formatting.
-        
-        Args:
-            text: Raw text string
-            
-        Returns:
-            Cleaned text string
-        """
-        if not isinstance(text, str):
-            return ""
-        
-        # Convert to lowercase
-        text = text.lower()
-        
-        # Remove URLs
-        text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
-        
-        # Remove email addresses
-        text = re.sub(r'\S+@\S+', '', text)
-        
-        # Remove special characters but keep spaces and basic punctuation
-        text = re.sub(r'[^\w\s\.\,\;\:\!\?]', ' ', text)
-        
-        # Remove extra whitespace
-        text = re.sub(r'\s+', ' ', text)
-        
-        return text.strip()
-    
-    def tokenize(self, text: str) -> List[str]:
-        """
-        Tokenize text into individual words.
-        
-        Args:
-            text: Input text string
-            
-        Returns:
-            List of tokens
-        """
-        # Use gensim's simple_preprocess for robust tokenization
-        tokens = simple_preprocess(text, deacc=True, min_len=self.min_word_length, max_len=self.max_word_length)
-        
-        # Remove numbers if specified
-        if self.remove_numbers:
-            tokens = [token for token in tokens if not token.isdigit()]
-        
-        # Remove stopwords
-        if self.remove_stopwords:
-            tokens = [token for token in tokens if token not in self.stopwords]
-        
-        # Lemmatize
-        if self.lemmatize and self.lemmatizer:
-            tokens = [self.lemmatizer.lemmatize(token) for token in tokens]
-        
-        return tokens
-    
-    def preprocess_text(self, text: str) -> List[str]:
-        """
-        Complete text preprocessing pipeline.
-        
-        Args:
-            text: Raw text string
-            
-        Returns:
-            List of preprocessed tokens
-        """
-        cleaned_text = self.clean_text(text)
-        tokens = self.tokenize(cleaned_text)
-        return tokens
-    
-    def preprocess_documents(self, documents: List[str], show_progress=True) -> List[List[str]]:
-        """
-        Process multiple documents.
-        
-        Args:
-            documents: List of text documents
-            show_progress: Whether to show progress bar
-            
-        Returns:
-            List of tokenized documents
-        """
-        preprocessed_docs = []
-        
-        if show_progress:
-            try:
-                iterator = tqdm(documents, desc="Processing documents")
-            except ImportError:
-                iterator = documents
-                print(f"Processing {len(documents)} documents...")
-        else:
-            iterator = documents
-        
-        for doc in iterator:
-            preprocessed_docs.append(self.preprocess_text(doc))
-        
-        return preprocessed_docs
-    
-    def filter_by_frequency(self, 
-                          tokenized_docs: List[List[str]], 
-                          min_freq: int = 1,
-                          max_freq_ratio: float = 0.995) -> List[List[str]]:
-        """
-        Filter tokens by document frequency.
-        Bounds for retained vocab are treated as exclusive (), not inclusive [].
-        
-        Args:
-            tokenized_docs: List of tokenized documents
-            min_freq: Minimum frequency threshold (excludes bound)
-            max_freq_ratio: Maximum frequency ratio (0-1) (excludes bound)
-            
-        Returns:
-            Filtered tokenized documents
-        """
-        # Count document frequencies
-        doc_freq = Counter()
-        for doc in tokenized_docs:
-            unique_tokens = set(doc)
-            for token in unique_tokens:
+    def __init__(self, stopword_lang='english', custom_stopwords=None):
+        self.stopwords = set(stopwords.words(stopword_lang))
+        if custom_stopwords:
+            self.stopwords.update(custom_stopwords)
+        self.lemmatizer = WordNetLemmatizer()
+        self.id2word = None
+        self.corpus = None
+        self.tokenized_docs = None
+        self.filtered_docs = None
+        self.lda_model = None
+        self.reduced_vocabulary = None
+        self.stats_log = {}
+
+    ### === STEP 1: Author and Category Filtering === ###
+    def standardize_authors(self, df):
+        df['authors'] = df['authors'].map(
+            lambda authlist: [str.upper(str.strip(f"{a[0]}, {a[1]}")) for a in authlist]
+        )
+        return df
+
+    def filter_by_categories(self, df, allowed_categories: List[str]):
+        return df[df['categories'].apply(lambda x: any(cat in x for cat in allowed_categories))]
+
+    ### === STEP 2: Basic Preprocessing === ###
+    def preprocess_raw_text(self, df, text_column='text'):
+        df['text_processed'] = df[text_column].map(super_simple_preprocess)
+        return df
+
+    def lemmatize_all(self, docs):
+        with Pool() as pool:
+            return pool.map(lemmatize_doc, docs)
+
+    def build_dictionary(self, tokenized_docs):
+        self.id2word = corpora.Dictionary(tokenized_docs)
+        self.tokenized_docs = tokenized_docs
+        self.stats_log['vocab_initial'] = len(self.id2word)
+
+    ### === STEP 3: Frequency and Stopword Filtering === ###
+    def compute_doc_frequencies(self, docs):
+        doc_freq = defaultdict(int)
+        for doc in docs:
+            for token in set(doc):
                 doc_freq[token] += 1
-        
-        total_docs = len(tokenized_docs)
-        max_freq = int(total_docs * max_freq_ratio)
-        
-        # Filter tokens
-        valid_tokens = set()
-        for token, freq in doc_freq.items():
-            if min_freq < freq < max_freq:
-                valid_tokens.add(token)
-        
-        # Apply filter to documents
-        filtered_docs = []
-        for doc in tokenized_docs:
-            filtered_doc = [token for token in doc if token in valid_tokens]
-            filtered_docs.append(filtered_doc)
-        
-        return filtered_docs
-    
-    def create_vocabulary(self, tokenized_docs: List[List[str]]) -> Dict[str, int]:
-        """
-        Create vocabulary mapping from tokenized documents.
-        
-        Args:
-            tokenized_docs: List of tokenized documents
-            
-        Returns:
-            Dictionary mapping tokens to IDs
-        """
-        vocab = set()
-        for doc in tokenized_docs:
-            vocab.update(doc)
-        
-        # Sort for consistent ordering
-        sorted_vocab = sorted(vocab)
-        vocab_dict = {token: idx for idx, token in enumerate(sorted_vocab)}
-        
-        return vocab_dict
-    
-    def get_statistics(self, tokenized_docs: List[List[str]]) -> Dict:
-        """
-        Get statistics about preprocessed documents.
-        
-        Args:
-            tokenized_docs: List of tokenized documents
-            
-        Returns:
-            Dictionary of statistics
-        """
-        if not tokenized_docs:
-            return {}
-        
-        doc_lengths = [len(doc) for doc in tokenized_docs]
-        all_tokens = [token for doc in tokenized_docs for token in doc]
-        token_counts = Counter(all_tokens)
-        
-        stats = {
-            'num_documents': len(tokenized_docs),
-            'total_tokens': len(all_tokens),
-            'unique_tokens': len(token_counts),
-            'avg_doc_length': np.mean(doc_lengths),
-            'median_doc_length': np.median(doc_lengths),
-            'min_doc_length': min(doc_lengths),
-            'max_doc_length': max(doc_lengths),
-            'vocabulary_size': len(set(all_tokens)),
-            'most_common_tokens': token_counts.most_common(10)
-        }
-        
-        return stats
-    
-    def extract_ngrams(self, 
-                      tokenized_docs: List[List[str]], 
-                      n: int = 2, 
-                      min_freq: int = 2) -> List[str]:
-        """
-        Extract n-grams from tokenized documents.
-        
-        Args:
-            tokenized_docs: List of tokenized documents
-            n: N-gram size
-            min_freq: Minimum frequency threshold
-            
-        Returns:
-            List of frequent n-grams
-        """
-        ngram_counts = Counter()
-        
-        for doc in tokenized_docs:
-            if len(doc) >= n:
-                for i in range(len(doc) - n + 1):
-                    ngram = '_'.join(doc[i:i+n])
-                    ngram_counts[ngram] += 1
-        
-        # Filter by frequency
-        frequent_ngrams = [ngram for ngram, count in ngram_counts.items() if count >= min_freq]
-        
-        return frequent_ngrams
-    
-    def add_custom_stopwords(self, stopwords_list: List[str]):
-        """Add custom stopwords to the existing set."""
-        self.stopwords.update(stopwords_list)
-    
-    def remove_short_documents(self, 
-                             tokenized_docs: List[List[str]], 
-                             min_length: int = 5) -> List[List[str]]:
-        """
-        Remove documents that are too short.
-        
-        Args:
-            tokenized_docs: List of tokenized documents
-            min_length: Minimum document length
-            
-        Returns:
-            Filtered list of documents
-        """
-        return [doc for doc in tokenized_docs if len(doc) >= min_length]
+        return doc_freq
 
+    def apply_frequency_stopword_filter(self, docs, low_thresh=1, high_frac=0.995, extra_stopwords=None):
+        ndocs = len(docs)
+        doc_freqs = self.compute_doc_frequencies(docs)
+        high_thresh = int(ndocs * high_frac)
 
-def create_academic_text_preprocessor():
-    """
-    Create a text preprocessor optimized for academic documents.
-    
-    Returns:
-        TextPreprocessor configured for academic texts
-    """
-    # Academic-specific stopwords
-    academic_stopwords = [
-        'paper', 'study', 'research', 'analysis', 'method', 'approach',
-        'result', 'conclusion', 'discussion', 'introduction', 'abstract',
-        'figure', 'table', 'section', 'chapter', 'article', 'journal',
-        'conference', 'proceedings', 'university', 'department', 'et', 'al'
-    ]
-    
-    return TextPreprocessor(
-        min_word_length=3,
-        max_word_length=30,
-        remove_numbers=True,
-        remove_stopwords=True,
-        lemmatize=True,
-        custom_stopwords=academic_stopwords
-    )
+        all_tokens = set(self.id2word.token2id.keys())
+        cut_tokens = set(
+            token for token, freq in doc_freqs.items()
+            if freq <= low_thresh or freq > high_thresh
+        )
+
+        if extra_stopwords:
+            cut_tokens.update(extra_stopwords)
+        cut_tokens.update(self.stopwords)
+
+        approved_tokens = {t for t in all_tokens if t not in cut_tokens and len(t) > 2}
+
+        # Apply in parallel
+        args = [(doc, approved_tokens) for doc in docs]
+        with Pool() as pool:
+            self.filtered_docs = pool.starmap(filter_doc_with_approved_tokens, args)
+
+        self.id2word = corpora.Dictionary(self.filtered_docs)
+        self.stats_log['vocab_filtered'] = len(self.id2word)
+
+    ### === STEP 4: Global LDA and Term Relevancy Filtering === ###
+    def train_lda_model(self, num_topics=50, passes=1):
+        self.corpus = [self.id2word.doc2bow(doc) for doc in self.filtered_docs]
+        self.lda_model = LdaModel(corpus=self.corpus, num_topics=num_topics, id2word=self.id2word, passes=passes)
+
+    def compute_relevancy_scores(self, lambda_param=0.6, top_n=2000):
+        topic_term_matrix = self.lda_model.get_topics()
+        vocab = self.id2word
+
+        # Build P(w)
+        all_terms = [t for doc in self.filtered_docs for t in doc]
+        term_counts = Counter(all_terms)
+        total_terms = sum(term_counts.values())
+        p_w = {term: count / total_terms for term, count in term_counts.items()}
+
+        # Build relevancy scores
+        epsilon = 1e-12
+        relevancy_scores = {}
+        for topic_id, topic_dist in enumerate(topic_term_matrix):
+            for term_id in np.argsort(topic_dist)[::-1]:
+                term = vocab[term_id]
+                p_w_given_t = max(topic_dist[term_id], epsilon)
+                p_w_term = max(p_w.get(term, epsilon), epsilon)
+
+                log_p_w_given_t = np.log(p_w_given_t)
+                log_p_w = np.log(p_w_term)
+                log_odds = log_p_w_given_t - log_p_w
+                relevancy = lambda_param * log_p_w_given_t + (1 - lambda_param) * log_odds
+                relevancy_scores[(term, topic_id)] = relevancy
+
+        # Top terms per topic
+        top_terms = set()
+        for topic_id in range(self.lda_model.num_topics):
+            topic_terms = {term: relevancy_scores[(term, topic_id)]
+                           for (term, tid) in relevancy_scores if tid == topic_id}
+            sorted_terms = sorted(topic_terms.items(), key=lambda x: x[1], reverse=True)[:top_n]
+            top_terms.update([term for term, _ in sorted_terms])
+
+        self.reduced_vocabulary = top_terms
+
+    def apply_relevancy_filter(self):
+        self.filtered_docs = [
+            [term for term in doc if term in self.reduced_vocabulary]
+            for doc in self.filtered_docs
+        ]
+        self.filtered_docs = [doc for doc in self.filtered_docs if len(doc) > 0]
+        self.id2word = corpora.Dictionary(self.filtered_docs)
+        self.corpus = [self.id2word.doc2bow(doc) for doc in self.filtered_docs]
+        self.stats_log['vocab_final'] = len(self.id2word)
+
+    ### === STEP 5: Accessors and Utilities === ###
+    def drop_empty_rows(self, df, text_col='text_processed'):
+        return df[df[text_col].map(lambda x: isinstance(x, list) and len(x) > 0)].reset_index(drop=True)
+
+    def get_dictionary(self):
+        return self.id2word
+
+    def get_corpus(self):
+        return self.corpus
+
+    def get_vocab_size(self):
+        return len(self.id2word) if self.id2word else 0
+
+    def get_stats_log(self):
+        return self.stats_log
+
+    def get_processed_docs(self):
+        return self.filtered_docs
+
+    def get_lda_model(self):
+        return self.lda_model
