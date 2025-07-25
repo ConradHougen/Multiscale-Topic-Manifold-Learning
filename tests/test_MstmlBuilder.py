@@ -9,6 +9,8 @@ import time
 import numpy as np
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from build import MstmlBuilder
 
 # Add root/build directory to path
@@ -17,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 class TestMstmlBuilder(unittest.TestCase):
     """Test cases for MstmlBuilder class."""
-    
+
     def setUp(self):
         """Set up test fixtures."""
         self.env_name = "mstml_tester"
@@ -49,19 +51,19 @@ class TestMstmlBuilder(unittest.TestCase):
             self.fail(f"MstmlBuilder constructor test failed: {e}")
 
 
-    
+
 def run_MstmlBuilder_tests():
     """Run MstmlBuilder verification."""
     print("=" * 60)
     print("MstmlBuilder class verification")
     print("=" * 60)
-    
+
     # Run unit tests
     print("\nRunning unit tests...")
     suite = unittest.TestLoader().loadTestsFromTestCase(TestMstmlBuilder)
     runner = unittest.TextTestRunner(verbosity=0, stream=open(os.devnull, 'w'))
     result = runner.run(suite)
-    
+
     if result.wasSuccessful():
         print("All tests passed!")
         return True

@@ -13,10 +13,10 @@ from typing import Optional, Dict
 from pathlib import Path
 from abc import ABC, abstractmethod
 
-from text_preprocessing import TextPreprocessor
-from author_disambiguation import AuthorDisambiguator
-from dataframe_schema import MainDataSchema
-from utils import log_print, validate_dataset_name
+from .text_preprocessing import TextPreprocessor
+from .author_disambiguation import AuthorDisambiguator
+from .dataframe_schema import MainDataSchema
+from .utils import log_print, validate_dataset_name
 
 
 def get_project_root_directory():

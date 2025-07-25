@@ -27,6 +27,7 @@ import hashlib
 import math
 import logging
 from scipy.spatial import KDTree
+from scipy.special import rel_entr
 from collections import Counter
 from math import factorial
 from pathlib import Path
@@ -155,32 +156,28 @@ def hellinger_similarity(p, q):
 
 def jensen_shannon_divergence(p, q):
     """
-    Compute Jensen-Shannon divergence between two probability distributions.
-    
+    Compute the Jensen-Shannon divergence between two probability distributions using rel_entr.
+
     Args:
-        p, q: Probability distributions (numpy arrays)
-        
+        p, q (array-like): Probability distributions
+
     Returns:
-        Jensen-Shannon divergence (float)
+        float: Jensen-Shannon divergence
     """
-    p = np.array(p)
-    q = np.array(q)
-    
+    p = np.asarray(p, dtype=np.float64)
+    q = np.asarray(q, dtype=np.float64)
+
+    if not np.any(p):
+        raise ValueError("Input p must have nonzero sum.")
+    if not np.any(q):
+        raise ValueError("Input q must have nonzero sum.")
+
     # Normalize
-    p = p / np.sum(p) if np.sum(p) > 0 else p
-    q = q / np.sum(q) if np.sum(q) > 0 else q
-    
-    # Compute M = (P + Q) / 2
+    p /= np.sum(p)
+    q /= np.sum(q)
+
     m = 0.5 * (p + q)
-    
-    # Compute KL divergences
-    def kl_divergence(x, y):
-        # Add small epsilon to avoid log(0)
-        epsilon = 1e-10
-        y = y + epsilon
-        return np.sum(x * np.log(x / y))
-    
-    return 0.5 * kl_divergence(p, m) + 0.5 * kl_divergence(q, m)
+    return 0.5 * np.sum(rel_entr(p, m)) + 0.5 * np.sum(rel_entr(q, m))
 
 
 def cosine_similarity(a, b):
