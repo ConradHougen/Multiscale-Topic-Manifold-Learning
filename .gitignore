@@ -182,3 +182,6 @@ mstml/fast_encode_tree/*.pyd
 
 # Exclude claude code files
 .claude/
+
+# Backup code
+.backup/

@@ -1,59 +1,33 @@
 """
-Utility functions (generic)
+General purpose utility functions for the MSTML package.
 
-This module contains various utility functions that are general-purpose for:
-1. Managing file I/O
-2. Computing vector distances
-3. Logging information
-4. Managing networkx graphs
-5. Anything that is not specific to the MSTML framework.
+This module contains clean, side-effect-free utility functions that are used across
+the MSTML codebase including:
+1. File I/O and directory management
+2. Distance and similarity metrics (consolidated from duplicates)
+3. Logging and validation utilities
+4. Basic data manipulation functions
+5. Hash and ID generation utilities
 
-For utility functions or classes specific to MSTML or GDLTM, see:
-1. mstml_utils.py
-2. gdtlm_utils.py
+For specialized utilities, see:
+- gdltm_utils.py: Temporal/longitudinal topic modeling utilities
+- mstml_utils.py: Network and hierarchical topic modeling utilities
 """
 
 import numpy as np
 import pandas as pd
-import networkx as nx
 import pickle
 import os
 import re
-import glob
-import matplotlib.pyplot as plt
-import nltk
-import random
 import hashlib
-import math
 import logging
-from scipy.spatial import KDTree
 from scipy.special import rel_entr
-from collections import Counter
-from math import factorial
 from pathlib import Path
-from bisect import bisect_left
-from datetime import datetime
-from sklearn.cluster import AgglomerativeClustering
-from gensim.utils import simple_preprocess
-from enum import Enum, auto
-
-from nltk.stem import WordNetLemmatizer
-from nltk.corpus import stopwords
 
 
-class AuthEmbedEnum(Enum):
-    """Different types of embedding representations for authors."""
-    WORD_FREQ = auto()
-    AT_DISTN = auto()
-    AT_SPARSIFIED_DISTN = auto()
-    TERM_RELEVANCE_N_HOT = auto()
-    TERM_RELEVANCE_VMASK = auto()
-
-
-class TopicRelevanceEnum(Enum):
-    """Different methods for representing topics filtered by relevance."""
-    N_HOT_ENCODING = auto()  # N nonzero entries for N most relevant terms
-    VOCAB_MASK = auto()      # Masked to union of N most relevant terms per topic
+# NOTE: Enums have been moved to their appropriate specialized modules:
+# - AuthEmbedEnum: moved to mstml_utils.py (network/hierarchical utilities)
+# - TopicRelevanceEnum: moved to gdltm_utils.py (temporal topic modeling utilities)
 
 
 def validate_dataset_name(name: str) -> bool:
@@ -203,92 +177,14 @@ def cosine_similarity(a, b):
     return dot_product / (norm_a * norm_b)
 
 
-def preprocess_text(text, remove_stopwords=True, lemmatize=True):
-    """
-    Preprocess text for topic modeling.
-    
-    Args:
-        text: Input text string
-        remove_stopwords: Whether to remove stopwords
-        lemmatize: Whether to lemmatize words
-        
-    Returns:
-        List of preprocessed tokens
-    """
-    # Convert to lowercase and tokenize
-    tokens = simple_preprocess(text, deacc=True)
-    
-    # Remove stopwords
-    if remove_stopwords:
-        stop_words = set(stopwords.words('english'))
-        tokens = [token for token in tokens if token not in stop_words]
-    
-    # Lemmatize
-    if lemmatize:
-        lemmatizer = WordNetLemmatizer()
-        tokens = [lemmatizer.lemmatize(token) for token in tokens]
-    
-    return tokens
+# NOTE: Text preprocessing functionality has been moved to text_preprocessing.py
+# Use TextPreprocessor class for comprehensive text preprocessing capabilities
 
 
-def create_author_network(author_collaborations):
-    """
-    Create a NetworkX graph from author collaborations.
-    
-    Args:
-        author_collaborations: List of author lists (each list represents co-authors)
-        
-    Returns:
-        NetworkX Graph object
-    """
-    G = nx.Graph()
-    
-    for authors in author_collaborations:
-        if len(authors) > 1:
-            # Add edges between all pairs of co-authors
-            for i in range(len(authors)):
-                for j in range(i + 1, len(authors)):
-                    if G.has_edge(authors[i], authors[j]):
-                        G[authors[i]][authors[j]]['weight'] += 1
-                    else:
-                        G.add_edge(authors[i], authors[j], weight=1)
-    
-    return G
+# NOTE: Network analysis functionality has been moved to mstml_utils.py
+# Use network analysis functions in mstml_utils.py for author networks and graph operations
 
 
-def compute_network_metrics(G):
-    """
-    Compute basic network metrics.
-    
-    Args:
-        G: NetworkX graph
-        
-    Returns:
-        Dictionary of network metrics
-    """
-    metrics = {}
-    
-    # Basic metrics
-    metrics['num_nodes'] = G.number_of_nodes()
-    metrics['num_edges'] = G.number_of_edges()
-    metrics['density'] = nx.density(G)
-    
-    # Connectivity
-    if nx.is_connected(G):
-        metrics['is_connected'] = True
-        metrics['diameter'] = nx.diameter(G)
-        metrics['avg_path_length'] = nx.average_shortest_path_length(G)
-    else:
-        metrics['is_connected'] = False
-        metrics['num_components'] = nx.number_connected_components(G)
-    
-    # Centrality measures (for smaller networks)
-    if G.number_of_nodes() < 1000:
-        metrics['avg_degree_centrality'] = np.mean(list(nx.degree_centrality(G).values()))
-        metrics['avg_betweenness_centrality'] = np.mean(list(nx.betweenness_centrality(G).values()))
-        metrics['avg_closeness_centrality'] = np.mean(list(nx.closeness_centrality(G).values()))
-    
-    return metrics
 
 
 def save_pickle(obj, filepath):
@@ -304,95 +200,12 @@ def load_pickle(filepath):
         return pickle.load(f)
 
 
-def create_time_windows(dates, window_size='1Y'):
-    """
-    Create time windows from a list of dates.
-    
-    Args:
-        dates: List of datetime objects
-        window_size: Pandas frequency string (e.g., '1Y', '6M', '1Q')
-        
-    Returns:
-        List of (start_date, end_date) tuples
-    """
-    if not dates:
-        return []
-    
-    dates = pd.to_datetime(dates)
-    min_date = dates.min()
-    max_date = dates.max()
-    
-    # Create date range
-    date_range = pd.date_range(start=min_date, end=max_date, freq=window_size)
-    
-    windows = []
-    for i in range(len(date_range) - 1):
-        windows.append((date_range[i], date_range[i + 1]))
-    
-    # Add final window if needed
-    if date_range[-1] < max_date:
-        windows.append((date_range[-1], max_date))
-    
-    return windows
+# NOTE: Temporal analysis functions have been moved to gdltm_utils.py
+# Use gdltm_utils.py for time windowing, frequency filtering, and topic coherence over time
 
 
-def filter_by_frequency(word_list, min_freq=2, max_freq_ratio=0.8):
-    """
-    Filter words by frequency.
-    
-    Args:
-        word_list: List of words
-        min_freq: Minimum frequency threshold
-        max_freq_ratio: Maximum frequency ratio (relative to total documents)
-        
-    Returns:
-        Filtered list of words
-    """
-    word_counts = Counter(word_list)
-    total_docs = len(word_list)
-    
-    filtered_words = []
-    for word, count in word_counts.items():
-        freq_ratio = count / total_docs
-        if count >= min_freq and freq_ratio <= max_freq_ratio:
-            filtered_words.extend([word] * count)
-    
-    return filtered_words
 
 
-def compute_topic_coherence(topic_words, texts, measure='c_v'):
-    """
-    Compute topic coherence score.
-    
-    Args:
-        topic_words: List of words in the topic
-        texts: List of documents (tokenized)
-        measure: Coherence measure ('c_v', 'c_npmi', 'c_uci', 'u_mass')
-        
-    Returns:
-        Coherence score (float)
-    """
-    try:
-        from gensim.models import CoherenceModel
-        from gensim.corpora import Dictionary
-        
-        # Create dictionary and corpus
-        dictionary = Dictionary(texts)
-        corpus = [dictionary.doc2bow(text) for text in texts]
-        
-        # Compute coherence
-        coherence_model = CoherenceModel(
-            topics=[topic_words],
-            texts=texts,
-            dictionary=dictionary,
-            coherence=measure
-        )
-        
-        return coherence_model.get_coherence()
-    
-    except ImportError:
-        print("Gensim not available for coherence computation")
-        return 0.0
 
 
 def normalize_vector(vector):
