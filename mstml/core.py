@@ -18,9 +18,11 @@ from typing import Optional, Union, Dict, Any, List, Tuple
 
 from .dataframe_schema import FieldDef, MainDataSchema
 from .data_loaders import get_project_root_directory, get_data_directory, JsonDataLoader
-from .utils import *
-from .gdltm_utils import *
-from .mstml_utils import *
+from ._embedding_driver import *
+from ._file_driver import *
+from ._graph_driver import *
+from ._math_driver import *
+from ._topic_model_driver import *
 
 """============================================================================
 Abstract Base Classes for Modular MSTML Components
@@ -358,40 +360,114 @@ class HellingerDistance(EmbeddingDistanceMetric):
     Default distance metric for MSTML topic manifold learning.
     """
     
+    def __init__(self, **kwargs):
+        """
+        Initialize Hellinger distance metric.
+        
+        Args:
+            **kwargs: Additional parameters (currently unused but provided for interface consistency)
+        """
+        super().__init__()
+        # Store any additional parameters for future extensions
+        self.params = kwargs
+    
     def compute_distance_matrix(self, vectors: np.ndarray) -> np.ndarray:
         """
-        Compute Hellinger distance matrix.
+        Compute Hellinger distance matrix using optimized vectorized operations.
         
         For probability distributions P and Q:
-        H(P,Q) = (1/√2) * ||√P - √Q||_2
+        H(P,Q) = √(0.5 * Σ(√P - √Q)²)
+        
+        Uses scipy.spatial.distance.pdist equivalent vectorized approach for maximum performance.
+        Automatically switches to memory-efficient mode for large datasets.
         """
-        # Ensure vectors are probability distributions
+        n_samples = vectors.shape[0]
+        
+        # For very large datasets (>10K samples), use memory-efficient chunked computation
+        # to avoid creating large (n, n, d) tensors that may exceed memory
+        memory_threshold = 10000
+        
+        if n_samples > memory_threshold:
+            return self._compute_distance_matrix_chunked(vectors)
+        
+        # Ensure vectors are probability distributions (vectorized normalization)
+        vectors = vectors / vectors.sum(axis=1, keepdims=True)
+        
+        # Compute square roots once
+        sqrt_vectors = np.sqrt(vectors)
+        
+        # Vectorized pairwise distance computation using broadcasting
+        # This creates (n, n, d) tensor where diff[i,j,:] = sqrt_vectors[i] - sqrt_vectors[j]
+        diff = sqrt_vectors[:, np.newaxis, :] - sqrt_vectors[np.newaxis, :, :]
+        
+        # Compute squared differences and sum along feature dimension, then apply sqrt(0.5 * ...)
+        # This is equivalent to the Hellinger distance formula
+        distance_matrix = np.sqrt(0.5 * np.sum(diff ** 2, axis=2))
+        
+        return distance_matrix
+        
+    def _compute_distance_matrix_chunked(self, vectors: np.ndarray, chunk_size: int = 1000) -> np.ndarray:
+        """
+        Memory-efficient chunked computation for large distance matrices.
+        
+        Processes the distance matrix in chunks to avoid memory overflow.
+        """
+        n_samples = vectors.shape[0]
+        
+        # Ensure vectors are probability distributions (vectorized normalization)
         vectors = vectors / vectors.sum(axis=1, keepdims=True)
         sqrt_vectors = np.sqrt(vectors)
         
-        n_samples = vectors.shape[0]
-        distance_matrix = np.zeros((n_samples, n_samples))
+        # Initialize distance matrix
+        distance_matrix = np.zeros((n_samples, n_samples), dtype=np.float32)
         
-        for i in range(n_samples):
-            for j in range(i, n_samples):
-                dist = np.linalg.norm(sqrt_vectors[i] - sqrt_vectors[j]) / np.sqrt(2)
-                distance_matrix[i, j] = dist
-                distance_matrix[j, i] = dist
+        # Process in chunks to manage memory usage
+        for i in range(0, n_samples, chunk_size):
+            i_end = min(i + chunk_size, n_samples)
+            for j in range(0, n_samples, chunk_size):
+                j_end = min(j + chunk_size, n_samples)
+                
+                # Compute chunk of distance matrix
+                chunk_i = sqrt_vectors[i:i_end]
+                chunk_j = sqrt_vectors[j:j_end]
+                
+                # Vectorized computation for this chunk
+                diff = chunk_i[:, np.newaxis, :] - chunk_j[np.newaxis, :, :]
+                chunk_distances = np.sqrt(0.5 * np.sum(diff ** 2, axis=2))
+                
+                distance_matrix[i:i_end, j:j_end] = chunk_distances
         
         return distance_matrix
     
     def compute_pairwise_distances(self, X: np.ndarray, Y: np.ndarray) -> np.ndarray:
-        # Ensure vectors are probability distributions
+        """
+        Compute pairwise Hellinger distances between two sets of vectors.
+        
+        Optimized vectorized implementation for cross-set distance computation.
+        
+        Args:
+            X: First set of vectors (n_samples_X, n_features)  
+            Y: Second set of vectors (n_samples_Y, n_features)
+            
+        Returns:
+            Distance matrix (n_samples_X, n_samples_Y)
+        """
+        # Ensure vectors are probability distributions (vectorized normalization)
         X = X / X.sum(axis=1, keepdims=True)
         Y = Y / Y.sum(axis=1, keepdims=True)
         
+        # Compute square roots once
         sqrt_X = np.sqrt(X)
         sqrt_Y = np.sqrt(Y)
         
-        distances = np.zeros((X.shape[0], Y.shape[0]))
-        for i in range(X.shape[0]):
-            for j in range(Y.shape[0]):
-                distances[i, j] = np.linalg.norm(sqrt_X[i] - sqrt_Y[j]) / np.sqrt(2)
+        # Vectorized pairwise distance computation using broadcasting
+        # sqrt_X[:, np.newaxis, :] has shape (n_X, 1, d)
+        # sqrt_Y[np.newaxis, :, :] has shape (1, n_Y, d)  
+        # Broadcasting creates (n_X, n_Y, d) difference tensor
+        diff = sqrt_X[:, np.newaxis, :] - sqrt_Y[np.newaxis, :, :]
+        
+        # Compute Hellinger distances: √(0.5 * Σ(√P - √Q)²)
+        distances = np.sqrt(0.5 * np.sum(diff ** 2, axis=2))
         
         return distances
     
@@ -407,7 +483,7 @@ class PHATEEmbedding(LowDimEmbedding):
     """
     
     def __init__(self, n_components: int = 2, knn_neighbors: int = 5, 
-                 gamma: float = 1.0, t: int = 10, **kwargs):
+                 gamma: float = 1.0, t = 'auto', **kwargs):
         self.n_components = n_components
         self.knn_neighbors = knn_neighbors
         self.gamma = gamma
@@ -590,7 +666,7 @@ class MstmlOrchestrator:
         self.time_chunks = []
         self.chunk_topic_models = []
         self.chunk_topics = []
-        self.smoothing_decay = self.config.get('temporal_smoothing_decay', 0.75)
+        self.smoothing_decay = self.config.get('temporal', {}).get('smoothing_decay', 0.75)
         
         # Modular components (dependency injection)
         self.topic_model_factory = create_topic_model
@@ -623,6 +699,20 @@ class MstmlOrchestrator:
         
         self.logger.info("MstmlOrchestrator initialized")
 
+    def _set_default_components(self):
+        """Initialize default components based on configuration."""
+        # Initialize default distance metric
+        distance_type = self.config['distance_metric']['type']
+        distance_params = self.config['distance_metric'].get('params', {})
+        self.distance_metric = create_distance_metric(distance_type, **distance_params)
+        
+        # Initialize default embedding method
+        embedding_type = self.config['embedding']['type']
+        embedding_params = self.config['embedding'].get('params', {})
+        self.embedding_method = create_embedding_method(embedding_type, **embedding_params)
+        
+        self.logger.info(f"Default components initialized: {distance_type} distance, {embedding_type} embedding")
+
     # ========================================================================================
     # 1. DATA LOADING AND MANAGEMENT
     # ========================================================================================
@@ -642,12 +732,86 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        # TODO: Implement data loading logic
-        # - Initialize appropriate DataLoader based on file type
-        # - Set up MainDataSchema with field definitions
-        # - Load and validate documents dataframe
-        # - Extract author information and create authors dataframe
+        from .data_loaders import JsonDataLoader, get_data_directory
+        from .dataframe_schema import MainDataSchema, FieldDef
+        from collections import defaultdict
+        import pandas as pd
+        
+        # Skip loading if already loaded (unless force_reload)
+        if self.documents_df is not None and not force_reload:
+            self.logger.info("Data already loaded. Use force_reload=True to reload.")
+            return self
+            
         self.logger.info(f"Loading data from {data_source}")
+        
+        # Initialize schema with custom config if provided
+        if schema_config:
+            # Create schema from config
+            field_defs = {}
+            for field_name, field_config in schema_config.items():
+                field_defs[field_name] = FieldDef(
+                    name=field_name,
+                    data_type=field_config.get('data_type', str),
+                    required=field_config.get('required', False),
+                    extractor_func=field_config.get('extractor_func')
+                )
+            self.schema = MainDataSchema(field_defs)
+        else:
+            # Use default schema for academic documents
+            self.schema = MainDataSchema({
+                'title': FieldDef('title', str, required=True),
+                'abstract': FieldDef('abstract', str, required=True), 
+                'authors': FieldDef('authors', list, required=True),
+                'date': FieldDef('date', str, required=True),
+                'keywords': FieldDef('keywords', list, required=False),
+                'venue': FieldDef('venue', str, required=False)
+            })
+        
+        # Initialize appropriate data loader based on file extension
+        if data_source.endswith('.json'):
+            self.data_loader = JsonDataLoader(data_source, self.schema)
+        else:
+            raise ValueError(f"Unsupported data format for {data_source}")
+        
+        # Load and validate documents
+        self.documents_df = self.data_loader.load_data()
+        self.logger.info(f"Loaded {len(self.documents_df)} documents")
+        
+        # Extract author information and create authors dataframe
+        author_data = defaultdict(list)
+        author_doc_counts = defaultdict(int)
+        author_names = {}
+        
+        for idx, row in self.documents_df.iterrows():
+            authors = row.get('authors', [])
+            if isinstance(authors, str):
+                authors = [authors]  # Handle single author case
+            
+            for author in authors:
+                if isinstance(author, dict):
+                    author_id = author.get('id', author.get('name', str(author)))
+                    author_name = author.get('name', str(author))
+                else:
+                    author_id = str(author)
+                    author_name = str(author)
+                
+                author_names[author_id] = author_name
+                author_data['author_id'].append(author_id)
+                author_data['document_id'].append(idx)
+                author_doc_counts[author_id] += 1
+        
+        # Create authors dataframe with publication counts
+        unique_authors = []
+        for author_id, name in author_names.items():
+            unique_authors.append({
+                'author_id': author_id,
+                'name': name,
+                'publication_count': author_doc_counts[author_id]
+            })
+        
+        self.authors_df = pd.DataFrame(unique_authors)
+        self.logger.info(f"Extracted {len(self.authors_df)} unique authors")
+        
         return self
     
     def setup_coauthor_network(self, 
@@ -663,11 +827,76 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        # TODO: Implement co-author network construction
-        # - Apply author disambiguation if requested
-        # - Build undirected co-author graph G = (V, E)
-        # - Store network structure and metadata
+        import networkx as nx
+        from collections import defaultdict, Counter
+        from itertools import combinations
+        from .author_disambiguation import AuthorDisambiguator
+        
+        if self.documents_df is None:
+            raise ValueError("No documents loaded. Call load_data() first.")
+        
         self.logger.info("Setting up co-author network")
+        
+        # Apply author disambiguation if requested
+        if author_disambiguation:
+            disambiguator = AuthorDisambiguator()
+            self.documents_df = disambiguator.disambiguate_authors(self.documents_df)
+            self.logger.info("Applied author disambiguation")
+        
+        # Build co-author collaboration counts
+        collaboration_counts = Counter()
+        author_document_map = defaultdict(list)
+        
+        for idx, row in self.documents_df.iterrows():
+            authors = row.get('authors', [])
+            if isinstance(authors, str):
+                authors = [authors]
+            
+            # Convert to author IDs if needed
+            author_ids = []
+            for author in authors:
+                if isinstance(author, dict):
+                    author_id = author.get('id', author.get('name', str(author)))
+                else:
+                    author_id = str(author)
+                author_ids.append(author_id)
+                author_document_map[author_id].append(idx)
+            
+            # Count co-author pairs
+            for author1, author2 in combinations(author_ids, 2):
+                pair = tuple(sorted([author1, author2]))
+                collaboration_counts[pair] += 1
+        
+        # Build undirected co-author graph
+        self.coauthor_network = nx.Graph()
+        
+        # Add all authors as nodes with metadata
+        for _, author_row in self.authors_df.iterrows():
+            author_id = author_row['author_id']
+            self.coauthor_network.add_node(
+                author_id,
+                name=author_row['name'],
+                publication_count=author_row['publication_count'],
+                documents=author_document_map.get(author_id, [])
+            )
+        
+        # Add edges for collaborations meeting minimum threshold
+        edges_added = 0
+        for (author1, author2), count in collaboration_counts.items():
+            if count >= min_collaborations:
+                self.coauthor_network.add_edge(
+                    author1, author2,
+                    weight=count,
+                    collaborations=count
+                )
+                edges_added += 1
+        
+        self.logger.info(
+            f"Created co-author network with {self.coauthor_network.number_of_nodes()} nodes "
+            f"and {self.coauthor_network.number_of_edges()} edges "
+            f"(min_collaborations={min_collaborations})"
+        )
+        
         return self
     
     # ========================================================================================
@@ -693,11 +922,77 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        # TODO: Implement text preprocessing pipeline
-        # - Apply standard NLP preprocessing (stopwords, stemming, etc.)
-        # - Filter vocabulary by frequency thresholds
-        # - Create vocabulary mapping and document term matrices
+        from gensim.utils import simple_preprocess
+        from gensim.corpora import Dictionary
+        from collections import Counter
+        import gensim.corpora as corpora
+        from ._file_driver import remove_stopwords as remove_stopwords_func, lemmatize_mp
+        import multiprocessing as mp
+        
+        if self.documents_df is None:
+            raise ValueError("No documents loaded. Call load_data() first.")
+        
         self.logger.info("Preprocessing text and filtering vocabulary")
+        
+        # Combine title and abstract for preprocessing
+        texts = []
+        for _, row in self.documents_df.iterrows():
+            title = str(row.get('title', ''))
+            abstract = str(row.get('abstract', ''))
+            combined_text = title + ' ' + abstract
+            texts.append(combined_text)
+        
+        # Apply simple preprocessing (tokenization, lowercasing, punctuation removal)
+        tokenized_texts = [simple_preprocess(text, deacc=True) for text in texts]
+        self.logger.info(f"Tokenized {len(tokenized_texts)} documents")
+        
+        # Remove stopwords if requested
+        if remove_stopwords:
+            tokenized_texts = remove_stopwords_func(tokenized_texts)
+            self.logger.info("Removed stopwords")
+        
+        # Apply stemming/lemmatization if requested
+        if apply_stemming:
+            # Use multiprocessing for lemmatization
+            with mp.Pool() as pool:
+                tokenized_texts = pool.map(lemmatize_mp, tokenized_texts)
+            self.logger.info("Applied lemmatization")
+        
+        # Apply custom filters if provided
+        if custom_filters:
+            for filter_func in custom_filters:
+                tokenized_texts = [filter_func(doc) for doc in tokenized_texts]
+            self.logger.info(f"Applied {len(custom_filters)} custom filters")
+        
+        # Create vocabulary dictionary
+        self.vocabulary = Dictionary(tokenized_texts)
+        vocab_size_before = len(self.vocabulary)
+        
+        # Filter vocabulary by frequency thresholds
+        # Convert max_term_freq from fraction to absolute count
+        max_term_count = int(max_term_freq * len(tokenized_texts)) if max_term_freq < 1.0 else max_term_freq
+        
+        self.vocabulary.filter_extremes(
+            no_below=min_term_freq,
+            no_above=max_term_count,
+            keep_n=None  # Keep all remaining tokens
+        )
+        
+        vocab_size_after = len(self.vocabulary)
+        self.logger.info(
+            f"Filtered vocabulary: {vocab_size_before} -> {vocab_size_after} terms "
+            f"(min_freq={min_term_freq}, max_freq={max_term_count})"
+        )
+        
+        # Create final preprocessed corpus as bag-of-words
+        self.preprocessed_corpus = [self.vocabulary.doc2bow(doc) for doc in tokenized_texts]
+        
+        # Store raw tokenized texts for future use
+        self.tokenized_texts = tokenized_texts
+        
+        total_tokens = sum(len(doc) for doc in tokenized_texts)
+        self.logger.info(f"Preprocessing complete: {total_tokens} total tokens, {len(self.vocabulary)} unique terms")
+        
         return self
     
     def apply_term_relevancy_filtering(self,
@@ -716,12 +1011,101 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        # TODO: Implement term relevancy filtering
-        # - Train global LDA model on full corpus
-        # - Compute term relevancy scores for each topic
-        # - Filter vocabulary to most relevant terms
-        # - Update document representations
+        import gensim
+        from gensim.models import LdaModel
+        import numpy as np
+        from ._math_driver import mstml_term_relevance_stable
+        from ._topic_model_driver import TermRelevanceTopicFilter
+        
+        if self.preprocessed_corpus is None:
+            raise ValueError("No preprocessed corpus available. Call preprocess_text() first.")
+        
         self.logger.info(f"Applying term relevancy filtering with λ={lambda_param}")
+        
+        # Train global LDA model on full corpus for term relevancy computation
+        num_topics_global = min(50, max(10, len(self.preprocessed_corpus) // 100))  # Heuristic topic count
+        
+        self.global_lda_model = LdaModel(
+            corpus=self.preprocessed_corpus,
+            id2word=self.vocabulary,
+            num_topics=num_topics_global,
+            random_state=42,
+            passes=10,
+            alpha='auto',
+            eta='auto'
+        )
+        
+        self.logger.info(f"Trained global LDA model with {num_topics_global} topics")
+        
+        # Get topic-word distributions (phi matrix)
+        topic_word_matrix = self.global_lda_model.get_topics()  # Shape: (num_topics, vocab_size)
+        
+        # Compute term relevancy scores for all topic-word pairs
+        relevant_terms = set()
+        
+        # Use the TermRelevanceTopicFilter class for filtering
+        filter_obj = TermRelevanceTopicFilter(
+            lambda_param=lambda_param,
+            top_n_terms=top_terms_per_topic
+        )
+        
+        for topic_idx in range(num_topics_global):
+            # Get relevancy scores for this topic
+            relevancy_scores = mstml_term_relevance_stable(
+                topic_word_matrix, topic_idx, lambda_param
+            )
+            
+            # Get top relevant term indices
+            top_term_indices = np.argsort(relevancy_scores)[-top_terms_per_topic:]
+            
+            # Add term IDs to relevant terms set
+            for term_idx in top_term_indices:
+                relevant_terms.add(term_idx)
+        
+        self.logger.info(f"Selected {len(relevant_terms)} relevant terms from {len(self.vocabulary)} total terms")
+        
+        # Create new vocabulary with only relevant terms
+        relevant_token_ids = list(relevant_terms)
+        old_vocabulary = self.vocabulary
+        
+        # Create mapping of old term IDs to new term IDs
+        old_to_new_id = {old_id: new_id for new_id, old_id in enumerate(relevant_token_ids)}
+        
+        # Build new vocabulary dictionary
+        new_vocab_dict = {}
+        for new_id, old_id in enumerate(relevant_token_ids):
+            new_vocab_dict[new_id] = old_vocabulary[old_id]
+        
+        # Create new Dictionary object
+        from gensim.corpora import Dictionary
+        self.vocabulary = Dictionary()
+        self.vocabulary.token2id = {token: idx for idx, token in new_vocab_dict.items()}
+        self.vocabulary.id2token = new_vocab_dict
+        
+        # Update preprocessed corpus with new vocabulary
+        new_corpus = []
+        for doc_bow in self.preprocessed_corpus:
+            new_doc = []
+            for term_id, count in doc_bow:
+                if term_id in old_to_new_id:
+                    new_term_id = old_to_new_id[term_id]
+                    new_doc.append((new_term_id, count))
+            new_corpus.append(new_doc)
+        
+        self.preprocessed_corpus = new_corpus
+        
+        # Update tokenized texts to match new vocabulary
+        if hasattr(self, 'tokenized_texts'):
+            relevant_tokens = set(self.vocabulary.token2id.keys())
+            self.tokenized_texts = [
+                [token for token in doc if token in relevant_tokens]
+                for doc in self.tokenized_texts
+            ]
+        
+        self.logger.info(
+            f"Term relevancy filtering complete: vocabulary reduced to {len(self.vocabulary)} terms"
+        )
+        
         return self
     
     # ========================================================================================
@@ -743,11 +1127,115 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        # TODO: Implement temporal chunking
-        # - Split corpus by time or document count
-        # - Apply optional overlap between chunks
-        # - Store chunk metadata and document assignments
+        import pandas as pd
+        from datetime import datetime
+        import numpy as np
+        
+        if self.documents_df is None:
+            raise ValueError("No documents loaded. Call load_data() first.")
+        
         self.logger.info("Creating temporal chunks")
+        
+        # Ensure date column is datetime
+        if 'date' not in self.documents_df.columns:
+            raise ValueError("Documents dataframe must have a 'date' column")
+        
+        df = self.documents_df.copy()
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.sort_values('date').reset_index(drop=True)
+        
+        self.time_chunks = []
+        
+        if chunk_duration is not None:
+            # Time-based chunking
+            min_date = df['date'].min()
+            max_date = df['date'].max()
+            
+            # Parse duration (e.g., '3M' -> 3 months)
+            import re
+            duration_match = re.match(r'(\d+)([YMWD])', chunk_duration.upper())
+            if not duration_match:
+                raise ValueError(f"Invalid chunk_duration format: {chunk_duration}. Use format like '3M', '6M', '1Y'")
+            
+            duration_value = int(duration_match.group(1))
+            duration_unit = duration_match.group(2)
+            
+            if duration_unit == 'M':
+                freq = pd.DateOffset(months=duration_value)
+            elif duration_unit == 'Y':
+                freq = pd.DateOffset(years=duration_value)
+            elif duration_unit == 'W':
+                freq = pd.DateOffset(weeks=duration_value)
+            elif duration_unit == 'D':
+                freq = pd.DateOffset(days=duration_value)
+            else:
+                raise ValueError(f"Unsupported duration unit: {duration_unit}")
+            
+            # Create chunks based on time windows
+            current_date = min_date
+            chunk_id = 0
+            
+            while current_date < max_date:
+                chunk_end = min(current_date + freq, max_date)
+                
+                # Get documents in this time window
+                chunk_mask = (df['date'] >= current_date) & (df['date'] < chunk_end)
+                chunk_docs = df[chunk_mask].index.tolist()
+                
+                if len(chunk_docs) > 0:  # Only create chunk if it has documents
+                    chunk_info = {
+                        'chunk_id': chunk_id,
+                        'start_date': current_date,
+                        'end_date': chunk_end,
+                        'document_indices': chunk_docs,
+                        'num_documents': len(chunk_docs)
+                    }
+                    self.time_chunks.append(chunk_info)
+                    chunk_id += 1
+                
+                # Move to next time window (with overlap if specified)
+                overlap_offset = freq * overlap_factor if overlap_factor > 0 else pd.DateOffset(0)
+                current_date = chunk_end - overlap_offset
+        
+        elif chunk_size is not None:
+            # Document count-based chunking
+            total_docs = len(df)
+            overlap_size = int(chunk_size * overlap_factor)
+            
+            chunk_id = 0
+            start_idx = 0
+            
+            while start_idx < total_docs:
+                end_idx = min(start_idx + chunk_size, total_docs)
+                chunk_docs = list(range(start_idx, end_idx))
+                
+                chunk_info = {
+                    'chunk_id': chunk_id,
+                    'start_date': df.iloc[start_idx]['date'],
+                    'end_date': df.iloc[end_idx-1]['date'],
+                    'document_indices': chunk_docs,
+                    'num_documents': len(chunk_docs)
+                }
+                self.time_chunks.append(chunk_info)
+                
+                chunk_id += 1
+                start_idx = end_idx - overlap_size  # Apply overlap
+        
+        else:
+            raise ValueError("Either chunk_size or chunk_duration must be specified")
+        
+        self.logger.info(
+            f"Created {len(self.time_chunks)} temporal chunks "
+            f"(overlap_factor={overlap_factor})"
+        )
+        
+        # Log chunk statistics
+        chunk_sizes = [chunk['num_documents'] for chunk in self.time_chunks]
+        self.logger.info(
+            f"Chunk sizes - min: {min(chunk_sizes)}, max: {max(chunk_sizes)}, "
+            f"mean: {np.mean(chunk_sizes):.1f}"
+        )
+        
         return self
     
     def apply_temporal_smoothing(self,
@@ -764,12 +1252,81 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        # TODO: Implement temporal smoothing
-        # - Apply exponential decay weighting to documents
-        # - Create smoothed sub-corpora for each time chunk
-        # - Update chunk document assignments
+        import numpy as np
+        from collections import defaultdict
+        
+        if not self.time_chunks:
+            raise ValueError("No temporal chunks created. Call create_temporal_chunks() first.")
+        
+        if not (0 < decay_parameter < 1):
+            raise ValueError(f"Decay parameter must be in (0,1), got {decay_parameter}")
+        
         self.smoothing_decay = decay_parameter
         self.logger.info(f"Applying temporal smoothing with γ={decay_parameter}")
+        
+        # Create smoothed document assignments for each chunk
+        smoothed_chunks = []
+        
+        for target_chunk_idx, target_chunk in enumerate(self.time_chunks):
+            # Start with documents in the target chunk
+            weighted_docs = []
+            
+            # Calculate weights for documents in all chunks
+            for source_chunk_idx, source_chunk in enumerate(self.time_chunks):
+                # Calculate temporal distance
+                time_distance = abs(target_chunk_idx - source_chunk_idx)
+                weight = decay_parameter ** time_distance
+                
+                # Add weighted documents from this source chunk
+                for doc_idx in source_chunk['document_indices']:
+                    weighted_docs.append({
+                        'document_index': doc_idx,
+                        'weight': weight,
+                        'source_chunk': source_chunk_idx
+                    })
+            
+            # Sort by weight (descending) to prioritize recent documents
+            weighted_docs.sort(key=lambda x: x['weight'], reverse=True)
+            
+            # Determine how many documents to include based on original chunk size
+            original_size = target_chunk['num_documents']
+            
+            # Include documents until we reach target size or weights become too small
+            min_weight_threshold = 0.01  # Minimum weight to include document
+            smoothed_doc_indices = []
+            total_weight = 0.0
+            
+            for doc_info in weighted_docs:
+                if (len(smoothed_doc_indices) < original_size * 2 and  # Don't exceed 2x original size
+                    doc_info['weight'] >= min_weight_threshold):
+                    smoothed_doc_indices.append(doc_info['document_index'])
+                    total_weight += doc_info['weight']
+            
+            # Create smoothed chunk info
+            smoothed_chunk = {
+                'chunk_id': target_chunk['chunk_id'],
+                'start_date': target_chunk['start_date'],
+                'end_date': target_chunk['end_date'],
+                'document_indices': smoothed_doc_indices,
+                'num_documents': len(smoothed_doc_indices),
+                'original_num_documents': original_size,
+                'total_weight': total_weight,
+                'decay_parameter': decay_parameter
+            }
+            smoothed_chunks.append(smoothed_chunk)
+        
+        # Update time chunks with smoothed versions
+        self.time_chunks = smoothed_chunks
+        
+        # Log smoothing statistics
+        original_sizes = [chunk['original_num_documents'] for chunk in self.time_chunks]
+        smoothed_sizes = [chunk['num_documents'] for chunk in self.time_chunks]
+        
+        self.logger.info(
+            f"Temporal smoothing complete. Average chunk size: "
+            f"{np.mean(original_sizes):.1f} -> {np.mean(smoothed_sizes):.1f}"
+        )
+        
         return self
     
     def train_ensemble_models(self,
@@ -787,12 +1344,113 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        # TODO: Implement ensemble model training
-        # - Train separate topic models on each temporal chunk
-        # - Extract topic-word distributions φ(k) for each model
-        # - Store model outputs and metadata
-        # - Scale K as affine function of documents per chunk if not specified
+        import numpy as np
+        from gensim.models import LdaModel
+        from gensim.corpora import Dictionary
+        
+        if not self.time_chunks:
+            raise ValueError("No temporal chunks created. Call create_temporal_chunks() first.")
+        
+        if self.preprocessed_corpus is None:
+            raise ValueError("No preprocessed corpus available. Call preprocess_text() first.")
+        
         self.logger.info(f"Training {base_model} ensemble models")
+        
+        # Set default model parameters
+        if model_params is None:
+            model_params = self.config['topic_model']['params'].get(base_model.lower(), {})
+        
+        self.chunk_topic_models = []
+        self.chunk_topics = []
+        
+        for chunk_idx, chunk_info in enumerate(self.time_chunks):
+            chunk_doc_indices = chunk_info['document_indices']
+            chunk_size = len(chunk_doc_indices)
+            
+            # Create chunk-specific corpus
+            chunk_corpus = [self.preprocessed_corpus[idx] for idx in chunk_doc_indices]
+            
+            # Determine number of topics for this chunk
+            if topics_per_chunk is None:
+                # Scale K as affine function of documents per chunk
+                # Heuristic: K = max(5, min(50, chunk_size // 10))
+                k_topics = max(5, min(50, chunk_size // 10))
+            else:
+                k_topics = topics_per_chunk
+            
+            self.logger.info(
+                f"Training chunk {chunk_idx + 1}/{len(self.time_chunks)}: "
+                f"{chunk_size} docs, {k_topics} topics"
+            )
+            
+            if base_model.upper() == 'LDA':
+                # Train LDA model for this chunk
+                lda_params = {
+                    'corpus': chunk_corpus,
+                    'id2word': self.vocabulary,
+                    'num_topics': k_topics,
+                    'random_state': 42,
+                    'passes': model_params.get('passes', 10),
+                    'iterations': model_params.get('iterations', 50),
+                    'alpha': model_params.get('alpha', 'auto'),
+                    'eta': model_params.get('eta', 'auto')
+                }
+                
+                chunk_model = LdaModel(**lda_params)
+                
+                # Extract topic-word distributions φ(k)
+                topic_word_distributions = chunk_model.get_topics()  # Shape: (num_topics, vocab_size)
+                
+                # Extract document-topic distributions for this chunk
+                doc_topic_distributions = []
+                for doc_bow in chunk_corpus:
+                    doc_topics = chunk_model.get_document_topics(doc_bow, minimum_probability=0.0)
+                    doc_topic_array = np.zeros(k_topics)
+                    for topic_id, prob in doc_topics:
+                        doc_topic_array[topic_id] = prob
+                    doc_topic_distributions.append(doc_topic_array)
+                
+                chunk_model_info = {
+                    'model': chunk_model,
+                    'model_type': base_model,
+                    'chunk_id': chunk_idx,
+                    'num_topics': k_topics,
+                    'num_documents': chunk_size,
+                    'topic_word_distributions': topic_word_distributions,
+                    'document_topic_distributions': np.array(doc_topic_distributions),
+                    'document_indices': chunk_doc_indices,
+                    'perplexity': chunk_model.log_perplexity(chunk_corpus),
+                    'coherence': None  # Can be computed later if needed
+                }
+                
+            else:
+                raise ValueError(f"Unsupported base model: {base_model}")
+            
+            self.chunk_topic_models.append(chunk_model_info)
+            
+            # Store individual topic vectors for manifold construction
+            for topic_idx in range(k_topics):
+                topic_vector = topic_word_distributions[topic_idx]
+                topic_info = {
+                    'chunk_id': chunk_idx,
+                    'topic_id': topic_idx,
+                    'global_topic_id': len(self.chunk_topics),  # Global index across all chunks
+                    'vector': topic_vector,
+                    'chunk_size': chunk_size
+                }
+                self.chunk_topics.append(topic_info)
+        
+        # Collect all topic vectors for manifold learning
+        self.topic_vectors = np.array([topic['vector'] for topic in self.chunk_topics])
+        
+        total_topics = len(self.chunk_topics)
+        avg_perplexity = np.mean([model['perplexity'] for model in self.chunk_topic_models])
+        
+        self.logger.info(
+            f"Ensemble training complete: {len(self.chunk_topic_models)} models, "
+            f"{total_topics} total topics, average perplexity: {avg_perplexity:.2f}"
+        )
+        
         return self
     
     # ========================================================================================
@@ -814,12 +1472,110 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        # TODO: Implement topic manifold construction
-        # - Collect all topic vectors {φ(k)} from ensemble models
-        # - Build k-nearest neighbors graph using Hellinger distance
-        # - Use FAISS for scalable approximate NN if requested
-        # - Store topic graph structure for downstream analysis
+        import numpy as np
+        import networkx as nx
+        from scipy.spatial.distance import pdist, squareform
+        from ._math_driver import hellinger
+        
+        if self.topic_vectors is None:
+            raise ValueError("No topic vectors available. Call train_ensemble_models() first.")
+        
         self.logger.info(f"Building topic manifold with {distance_metric} distance")
+        
+        n_topics = len(self.topic_vectors)
+        
+        # Use FAISS for large datasets if requested and available
+        if use_faiss and n_topics >= self.config['kNN_params']['faiss_acceleration']['min_vectors_for_faiss']:
+            try:
+                import faiss
+                
+                self.logger.info(f"Using FAISS for {n_topics} topic vectors")
+                
+                if distance_metric.lower() == 'hellinger':
+                    # For Hellinger distance, we need to use square root transformation
+                    sqrt_vectors = np.sqrt(self.topic_vectors).astype(np.float32)
+                    dimension = sqrt_vectors.shape[1]
+                    
+                    # Create FAISS index
+                    index = faiss.IndexFlatL2(dimension)
+                    index.add(sqrt_vectors)
+                    
+                    # Search for k+1 nearest neighbors (including self)
+                    distances, indices = index.search(sqrt_vectors, knn_neighbors + 1)
+                    
+                    # Convert L2 distances to Hellinger distances
+                    distances = distances / np.sqrt(2.0)
+                    
+                elif distance_metric.lower() == 'euclidean':
+                    vectors = self.topic_vectors.astype(np.float32)
+                    dimension = vectors.shape[1]
+                    
+                    index = faiss.IndexFlatL2(dimension)
+                    index.add(vectors)
+                    
+                    distances, indices = index.search(vectors, knn_neighbors + 1)
+                    distances = np.sqrt(distances)  # FAISS returns squared distances
+                    
+                else:
+                    raise ValueError(f"FAISS acceleration not supported for {distance_metric} distance")
+                
+                # Build kNN graph from FAISS results
+                self.topic_knn_graph = nx.Graph()
+                self.topic_knn_graph.add_nodes_from(range(n_topics))
+                
+                for i in range(n_topics):
+                    for j in range(1, knn_neighbors + 1):  # Skip self (index 0)
+                        neighbor_idx = indices[i, j]
+                        distance = distances[i, j]
+                        self.topic_knn_graph.add_edge(i, neighbor_idx, weight=distance)
+                
+            except ImportError:
+                self.logger.warning("FAISS not available, falling back to scipy")
+                use_faiss = False
+        
+        if not use_faiss:
+            # Use scipy for smaller datasets or when FAISS is not available
+            self.logger.info(f"Using scipy for {n_topics} topic vectors")
+            
+            # Compute pairwise distances
+            if distance_metric.lower() == 'hellinger':
+                distances = pdist(self.topic_vectors, metric=hellinger)
+            elif distance_metric.lower() == 'euclidean':
+                distances = pdist(self.topic_vectors, metric='euclidean')
+            elif distance_metric.lower() == 'cosine':
+                distances = pdist(self.topic_vectors, metric='cosine')
+            else:
+                raise ValueError(f"Unsupported distance metric: {distance_metric}")
+            
+            # Convert to square matrix
+            distance_matrix = squareform(distances)
+            
+            # Build kNN graph
+            self.topic_knn_graph = nx.Graph()
+            self.topic_knn_graph.add_nodes_from(range(n_topics))
+            
+            for i in range(n_topics):
+                # Get k nearest neighbors (excluding self)
+                neighbor_distances = [(j, distance_matrix[i, j]) for j in range(n_topics) if i != j]
+                neighbor_distances.sort(key=lambda x: x[1])
+                
+                # Add edges to k nearest neighbors
+                for j, dist in neighbor_distances[:knn_neighbors]:
+                    self.topic_knn_graph.add_edge(i, j, weight=dist)
+        
+        # Add metadata to nodes
+        for topic_idx, topic_info in enumerate(self.chunk_topics):
+            self.topic_knn_graph.nodes[topic_idx].update({
+                'chunk_id': topic_info['chunk_id'],
+                'topic_id': topic_info['topic_id'],
+                'chunk_size': topic_info['chunk_size']
+            })
+        
+        self.logger.info(
+            f"Topic manifold built: {self.topic_knn_graph.number_of_nodes()} nodes, "
+            f"{self.topic_knn_graph.number_of_edges()} edges (k={knn_neighbors})"
+        )
+        
         return self
     
     def construct_topic_dendrogram(self,
@@ -835,12 +1591,67 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        # TODO: Implement dendrogram construction
-        # - Apply agglomerative clustering to topic vectors
-        # - Use Ward's linkage: d(Ci,Cj) = |Ci|×|Cj|/(|Ci|+|Cj|) × ||μi-μj||²
-        # - Build binary tree structure with internal nodes
-        # - Normalize heights for consistent interpretation
+        from scipy.cluster.hierarchy import linkage, dendrogram
+        from scipy.spatial.distance import pdist
+        import numpy as np
+        from ._math_driver import hellinger
+        
+        if self.topic_vectors is None:
+            raise ValueError("No topic vectors available. Call train_ensemble_models() first.")
+        
         self.logger.info(f"Constructing topic dendrogram with {linkage_method} linkage")
+        
+        # Determine distance metric based on configuration
+        distance_metric = self.config['distance_metric']['type']
+        
+        # Compute pairwise distances
+        if distance_metric.lower() == 'hellinger':
+            distances = pdist(self.topic_vectors, metric=hellinger)
+        elif distance_metric.lower() == 'euclidean':
+            distances = pdist(self.topic_vectors, metric='euclidean')
+        elif distance_metric.lower() == 'cosine':
+            distances = pdist(self.topic_vectors, metric='cosine')
+        else:
+            self.logger.warning(f"Unknown distance metric {distance_metric}, using euclidean")
+            distances = pdist(self.topic_vectors, metric='euclidean')
+        
+        # Perform hierarchical clustering
+        if linkage_method.lower() == 'ward':
+            # Ward linkage requires Euclidean distances
+            if distance_metric.lower() != 'euclidean':
+                self.logger.warning("Ward linkage requires Euclidean distances, switching to average linkage")
+                linkage_method = 'average'
+        
+        # Compute linkage matrix
+        self.topic_dendrogram = linkage(distances, method=linkage_method)
+        
+        # Normalize heights if requested
+        if height_normalization:
+            min_height = np.min(self.topic_dendrogram[:, 2])
+            max_height = np.max(self.topic_dendrogram[:, 2])
+            
+            if max_height > min_height:  # Avoid division by zero
+                self.topic_dendrogram[:, 2] = (
+                    (self.topic_dendrogram[:, 2] - min_height) / (max_height - min_height)
+                )
+            
+            self.logger.info(f"Normalized dendrogram heights to [0, 1]")
+        
+        # Store dendrogram metadata
+        self.dendrogram_info = {
+            'linkage_method': linkage_method,
+            'distance_metric': distance_metric,
+            'height_normalization': height_normalization,
+            'num_topics': len(self.topic_vectors),
+            'min_height': np.min(self.topic_dendrogram[:, 2]),
+            'max_height': np.max(self.topic_dendrogram[:, 2])
+        }
+        
+        self.logger.info(
+            f"Topic dendrogram constructed: {len(self.topic_vectors)} leaves, "
+            f"height range [{self.dendrogram_info['min_height']:.3f}, {self.dendrogram_info['max_height']:.3f}]"
+        )
+        
         return self
     
     def estimate_node_probabilities(self,
@@ -857,13 +1668,120 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        # TODO: Implement HRG probability estimation
-        # - Compute expected edges E_m for each internal node
-        # - Estimate left/right subtree sizes L_m, R_m
-        # - Calculate MLE probabilities p_m = E_m / (L_m × R_m)
-        # - Store probabilities for link evaluation and prediction
+        import numpy as np
+        from ._topic_model_driver import setup_author_probs_matrix
+        from .fast_encode_tree import fast_encode_tree_structure
+        
+        if self.topic_dendrogram is None:
+            raise ValueError("No topic dendrogram available. Call construct_topic_dendrogram() first.")
+        
+        if self.coauthor_network is None:
+            raise ValueError("No co-author network available. Call setup_coauthor_network() first.")
+        
         self.logger.info("Estimating dendrogram node probabilities")
+        
+        # Compute author-topic distributions if using author embeddings
+        if use_author_embeddings:
+            if self.author_topic_distributions is None:
+                self.logger.info("Computing author embeddings for HRG estimation")
+                self.compute_author_embeddings(apply_diffusion=False)
+        
+        # Encode tree structure for fast probability computation
+        # Create author index mapping
+        author_index_map = {}
+        for idx, author_id in enumerate(self.coauthor_network.nodes()):
+            author_index_map[author_id] = idx
+        
+        # Use fast tree encoding from the driver
+        try:
+            encoded_root, _ = fast_encode_tree_structure(
+                self.topic_dendrogram, 
+                self.author_topic_distributions or {},
+                self.coauthor_network
+            )
+            
+            # Extract node probabilities from encoded tree
+            self.internal_node_probabilities = self._extract_node_probabilities(encoded_root)
+            
+        except Exception as e:
+            self.logger.warning(f"Fast tree encoding failed: {e}, using simplified estimation")
+            
+            # Fallback to simplified probability estimation
+            n_internal_nodes = len(self.topic_dendrogram)
+            self.internal_node_probabilities = {}
+            
+            for node_idx in range(n_internal_nodes):
+                # Get internal node information from linkage matrix
+                left_child = int(self.topic_dendrogram[node_idx, 0])
+                right_child = int(self.topic_dendrogram[node_idx, 1])
+                height = self.topic_dendrogram[node_idx, 2]
+                
+                # Estimate subtree sizes (simplified)
+                left_size = self._estimate_subtree_size(left_child, n_internal_nodes)
+                right_size = self._estimate_subtree_size(right_child, n_internal_nodes)
+                
+                # Estimate expected edges based on author network density
+                if self.coauthor_network.number_of_edges() > 0:
+                    network_density = (2 * self.coauthor_network.number_of_edges() / 
+                                     (self.coauthor_network.number_of_nodes() * 
+                                      (self.coauthor_network.number_of_nodes() - 1)))
+                else:
+                    network_density = 0.01  # Default small value
+                
+                # Simple MLE estimate
+                expected_edges = network_density * left_size * right_size
+                probability = min(1.0, expected_edges / (left_size * right_size)) if left_size * right_size > 0 else 0.0
+                
+                internal_node_id = node_idx + len(self.topic_vectors)  # Offset by number of leaves
+                self.internal_node_probabilities[internal_node_id] = {
+                    'probability': probability,
+                    'left_size': left_size,
+                    'right_size': right_size,
+                    'expected_edges': expected_edges,
+                    'height': height
+                }
+        
+        num_estimated = len(self.internal_node_probabilities)
+        avg_probability = np.mean([info['probability'] for info in self.internal_node_probabilities.values()])
+        
+        self.logger.info(
+            f"Estimated probabilities for {num_estimated} internal nodes, "
+            f"average probability: {avg_probability:.4f}"
+        )
+        
         return self
+    
+    def _extract_node_probabilities(self, encoded_root):
+        """Extract node probabilities from encoded tree structure."""
+        probabilities = {}
+        
+        def traverse_tree(node):
+            if hasattr(node, 'id') and hasattr(node, 'probability'):
+                probabilities[node.id] = {
+                    'probability': getattr(node, 'probability', 0.0),
+                    'left_size': getattr(node, 'left_size', 1),
+                    'right_size': getattr(node, 'right_size', 1),
+                    'expected_edges': getattr(node, 'expected_edges', 0.0),
+                    'height': getattr(node, 'height', 0.0)
+                }
+            
+            if hasattr(node, 'left') and node.left:
+                traverse_tree(node.left)
+            if hasattr(node, 'right') and node.right:
+                traverse_tree(node.right)
+        
+        if encoded_root:
+            traverse_tree(encoded_root)
+        
+        return probabilities
+    
+    def _estimate_subtree_size(self, node_id, n_internal_nodes):
+        """Estimate the size of a subtree rooted at node_id."""
+        if node_id < len(self.topic_vectors):  # Leaf node
+            return 1
+        else:  # Internal node
+            # Simplified estimation based on tree structure
+            return max(1, int(np.log2(n_internal_nodes - node_id + len(self.topic_vectors)) + 1))
     
     # ========================================================================================
     # 5. AUTHOR REPRESENTATION LEARNING
@@ -887,12 +1805,122 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        # TODO: Implement author embedding computation
-        # - Create weighted averages of document-topic distributions
-        # - Weight by inverse number of co-authors per document
-        # - Apply diffusion process using topic k-NN graph if requested
-        # - Normalize to create proper probability distributions ψ(u)
+        import numpy as np
+        from collections import defaultdict
+        from ._math_driver import diffuse_distribution
+        
+        if not self.chunk_topic_models:
+            raise ValueError("No topic models available. Call train_ensemble_models() first.")
+        
+        if self.coauthor_network is None:
+            raise ValueError("No co-author network available. Call setup_coauthor_network() first.")
+        
         self.logger.info("Computing author embeddings in topic space")
+        
+        # Initialize author embeddings
+        total_topics = len(self.topic_vectors)
+        self.author_topic_distributions = {}
+        
+        # Create mapping from document index to chunk topic distributions
+        doc_to_topics = {}
+        
+        for chunk_model in self.chunk_topic_models:
+            chunk_id = chunk_model['chunk_id']
+            doc_indices = chunk_model['document_indices']
+            doc_topic_distributions = chunk_model['document_topic_distributions']
+            
+            for local_doc_idx, global_doc_idx in enumerate(doc_indices):
+                # Map to global topic indices
+                global_topic_dist = np.zeros(total_topics)
+                
+                # Find where this chunk's topics start in the global index
+                topic_offset = sum(
+                    model['num_topics'] for model in self.chunk_topic_models[:chunk_id]
+                )
+                
+                # Copy chunk topic distribution to correct global positions
+                chunk_num_topics = chunk_model['num_topics']
+                global_topic_dist[topic_offset:topic_offset + chunk_num_topics] = doc_topic_distributions[local_doc_idx]
+                
+                doc_to_topics[global_doc_idx] = global_topic_dist
+        
+        # Compute author embeddings
+        for author_id in self.coauthor_network.nodes():
+            author_documents = self.coauthor_network.nodes[author_id].get('documents', [])
+            
+            if not author_documents:
+                # Author with no documents gets uniform distribution
+                self.author_topic_distributions[author_id] = np.ones(total_topics) / total_topics
+                continue
+            
+            # Compute weighted average of document topic distributions
+            weighted_topics = np.zeros(total_topics)
+            total_weight = 0.0
+            
+            for doc_idx in author_documents:
+                if doc_idx not in doc_to_topics:
+                    continue  # Skip documents not in any temporal chunk
+                
+                doc_topic_dist = doc_to_topics[doc_idx]
+                
+                # Compute document weight based on weighting scheme
+                if weighting_scheme == 'inverse_coauthors':
+                    # Weight by inverse number of co-authors
+                    doc_authors = []
+                    for _, row in self.documents_df.iterrows():
+                        if _ == doc_idx:
+                            authors = row.get('authors', [])
+                            if isinstance(authors, str):
+                                authors = [authors]
+                            doc_authors = authors
+                            break
+                    
+                    weight = 1.0 / max(1, len(doc_authors))
+                    
+                elif weighting_scheme == 'uniform':
+                    weight = 1.0
+                    
+                else:
+                    raise ValueError(f"Unknown weighting scheme: {weighting_scheme}")
+                
+                weighted_topics += weight * doc_topic_dist
+                total_weight += weight
+            
+            # Normalize to create probability distribution
+            if total_weight > 0:
+                author_embedding = weighted_topics / total_weight
+            else:
+                author_embedding = np.ones(total_topics) / total_topics
+            
+            self.author_topic_distributions[author_id] = author_embedding
+        
+        # Apply diffusion process if requested
+        if apply_diffusion and self.topic_knn_graph is not None:
+            self.logger.info(f"Applying {diffusion_steps} diffusion steps")
+            
+            for author_id in self.author_topic_distributions:
+                initial_dist = self.author_topic_distributions[author_id]
+                
+                # Apply diffusion using topic kNN graph
+                diffused_dist = diffuse_distribution(
+                    self.topic_knn_graph,
+                    initial_dist,
+                    num_iterations=diffusion_steps
+                )
+                
+                self.author_topic_distributions[author_id] = diffused_dist
+        
+        # Create author embeddings matrix for easier access
+        author_ids = list(self.author_topic_distributions.keys())
+        self.author_embeddings = np.array([
+            self.author_topic_distributions[author_id] for author_id in author_ids
+        ])
+        
+        self.logger.info(
+            f"Computed embeddings for {len(self.author_topic_distributions)} authors "
+            f"in {total_topics}-dimensional topic space"
+        )
+        
         return self
     
     def compute_interdisciplinarity_scores_docs(self,
@@ -913,13 +1941,100 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        # TODO: Implement document interdisciplinarity scoring
-        # - Compute document-level topic distributions from author contributions
-        # - Calculate entropy H(Ω(j)) for each document
-        # - Weight by author publication counts if requested
-        # - Rank and return top N documents if topn specified
-        # - Store scores for anomaly detection and analysis
+        import numpy as np
+        from scipy.stats import entropy
+        from collections import OrderedDict
+        
+        if self.author_topic_distributions is None:
+            raise ValueError("No author embeddings available. Call compute_author_embeddings() first.")
+        
         self.logger.info(f"Computing interdisciplinarity scores for documents{' (top ' + str(topn) + ')' if topn else ''}")
+        
+        doc_scores = {}
+        
+        for doc_idx, row in self.documents_df.iterrows():
+            authors = row.get('authors', [])
+            if isinstance(authors, str):
+                authors = [authors]
+            
+            if not authors:
+                doc_scores[doc_idx] = 0.0
+                continue
+            
+            # Extract author IDs
+            author_ids = []
+            for author in authors:
+                if isinstance(author, dict):
+                    author_id = author.get('id', author.get('name', str(author)))
+                else:
+                    author_id = str(author)
+                author_ids.append(author_id)
+            
+            # Compute document topic distribution from author contributions
+            doc_topic_dist = np.zeros(len(self.topic_vectors))
+            total_weight = 0.0
+            
+            for author_id in author_ids:
+                if author_id in self.author_topic_distributions:
+                    author_dist = self.author_topic_distributions[author_id]
+                    
+                    # Author weight
+                    if author_publication_weighting:
+                        # Weight by sqrt of publication count
+                        pub_count = self.coauthor_network.nodes[author_id].get('publication_count', 1)
+                        weight = np.sqrt(pub_count)
+                    else:
+                        weight = 1.0
+                    
+                    doc_topic_dist += weight * author_dist
+                    total_weight += weight
+            
+            # Normalize document topic distribution
+            if total_weight > 0:
+                doc_topic_dist /= total_weight
+            else:
+                doc_topic_dist = np.ones(len(self.topic_vectors)) / len(self.topic_vectors)
+            
+            # Compute interdisciplinarity score
+            score = 0.0
+            
+            if entropy_weighting:
+                # Calculate entropy of topic distribution
+                # Add small epsilon to avoid log(0)
+                epsilon = 1e-10
+                doc_topic_dist_safe = doc_topic_dist + epsilon
+                doc_topic_dist_safe /= doc_topic_dist_safe.sum()  # Renormalize
+                
+                topic_entropy = entropy(doc_topic_dist_safe, base=2)
+                score = topic_entropy
+            else:
+                # Simple diversity measure (1 - max probability)
+                score = 1.0 - np.max(doc_topic_dist)
+            
+            # Weight by author publication mass if requested
+            if author_publication_weighting:
+                score *= total_weight
+            
+            doc_scores[doc_idx] = score
+        
+        # Sort and potentially truncate results
+        sorted_docs = OrderedDict(
+            sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
+        )
+        
+        if topn is not None:
+            sorted_docs = OrderedDict(list(sorted_docs.items())[:topn])
+        
+        self.interdisciplinarity_scores['documents'] = sorted_docs
+        
+        avg_score = np.mean(list(doc_scores.values()))
+        max_score = max(doc_scores.values())
+        
+        self.logger.info(
+            f"Computed interdisciplinarity scores for {len(doc_scores)} documents. "
+            f"Average: {avg_score:.3f}, Max: {max_score:.3f}"
+        )
+        
         return self
     
     def compute_interdisciplinarity_scores_authors(self,
@@ -941,14 +2056,73 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        # TODO: Implement author interdisciplinarity scoring
-        # - Compute author-level topic distributions ψ(u)
-        # - Calculate entropy H(ψ(u)) for each author
-        # - Weight by publication counts if requested
-        # - Filter to top topics per author if specified
-        # - Rank and return top N authors if topn specified
-        # - Store scores for anomaly detection and analysis
+        import numpy as np
+        from scipy.stats import entropy
+        from collections import OrderedDict
+        
+        if self.author_topic_distributions is None:
+            raise ValueError("No author embeddings available. Call compute_author_embeddings() first.")
+        
         self.logger.info(f"Computing interdisciplinarity scores for authors{' (top ' + str(topn) + ')' if topn else ''}")
+        
+        author_scores = {}
+        
+        for author_id, topic_dist in self.author_topic_distributions.items():
+            # Filter to top topics if specified
+            if top_topics_threshold > 0 and top_topics_threshold < len(topic_dist):
+                # Keep only top K topics, zero out the rest
+                top_indices = np.argsort(topic_dist)[-top_topics_threshold:]
+                filtered_dist = np.zeros_like(topic_dist)
+                filtered_dist[top_indices] = topic_dist[top_indices]
+                
+                # Renormalize
+                if filtered_dist.sum() > 0:
+                    filtered_dist /= filtered_dist.sum()
+                else:
+                    filtered_dist = topic_dist  # Fallback to original
+            else:
+                filtered_dist = topic_dist
+            
+            # Compute interdisciplinarity score
+            score = 0.0
+            
+            if entropy_weighting:
+                # Calculate entropy of topic distribution
+                epsilon = 1e-10
+                dist_safe = filtered_dist + epsilon
+                dist_safe /= dist_safe.sum()  # Renormalize
+                
+                topic_entropy = entropy(dist_safe, base=2)
+                score = topic_entropy
+            else:
+                # Simple diversity measure (1 - max probability)
+                score = 1.0 - np.max(filtered_dist)
+            
+            # Weight by publication count if requested
+            if publication_count_weighting:
+                pub_count = self.coauthor_network.nodes[author_id].get('publication_count', 1)
+                score *= np.log1p(pub_count)  # Log(1 + count) for smoother scaling
+            
+            author_scores[author_id] = score
+        
+        # Sort and potentially truncate results
+        sorted_authors = OrderedDict(
+            sorted(author_scores.items(), key=lambda x: x[1], reverse=True)
+        )
+        
+        if topn is not None:
+            sorted_authors = OrderedDict(list(sorted_authors.items())[:topn])
+        
+        self.interdisciplinarity_scores['authors'] = sorted_authors
+        
+        avg_score = np.mean(list(author_scores.values()))
+        max_score = max(author_scores.values())
+        
+        self.logger.info(
+            f"Computed interdisciplinarity scores for {len(author_scores)} authors. "
+            f"Average: {avg_score:.3f}, Max: {max_score:.3f}"
+        )
+        
         return self
     
     # ========================================================================================
@@ -959,7 +2133,7 @@ class MstmlOrchestrator:
                              n_components: int = 2,
                              knn_neighbors: int = 5,
                              gamma: float = 1.0,
-                             t: int = 10,
+                             t: str = "auto",
                              color_by: str = 'time',
                              show_colorbar: bool = True,
                              interactive: bool = False,
@@ -983,13 +2157,61 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        # TODO: Implement PHATE embedding
-        # - Apply PHATE to topic vectors using Hellinger distance
-        # - Preserve temporal structure and topic relationships
-        # - Store embedding coordinates and visualization parameters
-        # - Support time-based and meta-topic color coding
-        # - Handle colorbar and interactivity options
+        import numpy as np
+        from scipy.spatial.distance import pdist, squareform
+        from ._math_driver import hellinger
+        
+        if self.topic_vectors is None:
+            raise ValueError("No topic vectors available. Call build_topic_manifold() first.")
+        
+        self.logger.info(f"Creating {n_components}D PHATE embedding with {color_by} coloring")
+        
+        # Try to import PHATE, fall back to PCA if not available
+        try:
+            import phate
+            use_phate = True
+        except ImportError:
+            self.logger.warning("PHATE not available, falling back to PCA")
+            from sklearn.decomposition import PCA
+            use_phate = False
+        
+        # Convert topic vectors to numpy array
+        topic_matrix = np.array(self.topic_vectors)
+        
+        if use_phate:
+            # Compute Hellinger distance matrix
+            n_topics = len(self.topic_vectors)
+            distance_matrix = np.zeros((n_topics, n_topics))
+            
+            for i in range(n_topics):
+                for j in range(i+1, n_topics):
+                    dist = hellinger(topic_matrix[i], topic_matrix[j])
+                    distance_matrix[i, j] = dist
+                    distance_matrix[j, i] = dist
+            
+            # Create PHATE operator with precomputed distance
+            phate_op = phate.PHATE(
+                n_components=n_components,
+                knn=knn_neighbors,
+                gamma=gamma,
+                t=t,
+                metric='precomputed',
+                random_state=42
+            )
+            
+            # Apply PHATE transformation
+            self.topic_embedding = phate_op.fit_transform(distance_matrix)
+            
+        else:
+            # Fallback to PCA
+            pca = PCA(n_components=n_components, random_state=42)
+            self.topic_embedding = pca.fit_transform(topic_matrix)
+            
+            self.logger.info(f"PCA explained variance ratio: {pca.explained_variance_ratio_}")
+        
+        # Store embedding parameters
         self.embed_params = {
+            'method': 'PHATE' if use_phate else 'PCA',
             'n_components': n_components,
             'knn_neighbors': knn_neighbors,
             'gamma': gamma,
@@ -999,7 +2221,27 @@ class MstmlOrchestrator:
             'interactive': interactive,
             'figure_size': figure_size
         }
-        self.logger.info(f"Creating {n_components}D PHATE embedding with {color_by} coloring")
+        
+        # Create time-based coloring information if requested
+        if color_by == 'time' and self.time_chunks:
+            self.topic_time_labels = []
+            for chunk_model in self.chunk_topic_models:
+                chunk_id = chunk_model['chunk_id']
+                num_topics = chunk_model['num_topics']
+                chunk_name = self.time_chunks[chunk_id]['name']
+                
+                # Assign time label to each topic in this chunk
+                self.topic_time_labels.extend([chunk_name] * num_topics)
+        
+        # Create meta-topic coloring information if dendrogram available
+        if color_by == 'meta_topic' and self.topic_cluster_labels is not None:
+            self.topic_cluster_colors = self.topic_cluster_labels
+        
+        self.logger.info(
+            f"Created {'PHATE' if use_phate else 'PCA'} embedding: "
+            f"{topic_matrix.shape[0]} topics -> {n_components}D space"
+        )
+        
         return self
     
     def display_topic_embedding(self,
@@ -1198,7 +2440,7 @@ class MstmlOrchestrator:
     
     def export_results(self,
                       output_directory: str,
-                      formats: list = ['json', 'csv', 'pkl']) -> 'MstmlOrchestrator':
+                      formats: Optional[List[str]] = None) -> 'MstmlOrchestrator':
         """
         Export analysis results in multiple formats.
         
@@ -1209,11 +2451,14 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
+        if formats is None:
+            formats = ['json', 'csv', 'pkl']
+            
         # TODO: Implement results export
         # - Export topic models, embeddings, and analysis results
         # - Support multiple formats (JSON, CSV, pickle)
         # - Include metadata and configuration information
-        self.logger.info(f"Exporting results to {output_directory}")
+        self.logger.info(f"Exporting results to {output_directory} in formats: {formats}")
         return self
     
     # ========================================================================================
@@ -1221,34 +2466,153 @@ class MstmlOrchestrator:
     # ========================================================================================
     
     def _get_default_config(self) -> dict:
-        """Get default configuration parameters."""
+        """Get default configuration parameters organized by component."""
         return {
-            # Temporal ensemble parameters  
-            'temporal_smoothing_decay': 0.75,
+            # Temporal Analysis Configuration
+            'temporal': {
+                'smoothing_decay': 0.75,
+                'time_window_strategy': 'sliding',  # 'sliding', 'fixed', 'adaptive'
+                'min_docs_per_window': 10,
+                'temporal_alignment_method': 'linear'
+            },
             
-            # Default topic model parameters (Gensim LDA)
-            'topic_model_type': 'LDA',
-            'lda_alpha': 'auto',
-            'lda_eta': 'auto', 
-            'lda_passes': 10,
-            'lda_iterations': 50,
+            # Topic Model Configuration  
+            'topic_model': {
+                'type': 'LDA',  # 'LDA', 'BERTopic', 'GPTopic'
+                'params': {
+                    # LDA-specific parameters (used when type='LDA')
+                    'lda': {
+                        'alpha': 'auto',
+                        'eta': 'auto',
+                        'passes': 10,
+                        'iterations': 50,
+                        'num_topics': 'auto',
+                        'random_state': 42
+                    },
+                    # BERTopic parameters (used when type='BERTopic')  
+                    'bertopic': {
+                        'embedding_model': 'all-MiniLM-L6-v2',
+                        'umap_params': {'n_neighbors': 15, 'min_dist': 0.1},
+                        'hdbscan_params': {'min_cluster_size': 10},
+                        'min_topic_size': 10,
+                        'calculate_probabilities': True
+                    },
+                    # GPT-based topic modeling parameters
+                    'gptopic': {
+                        'model_name': 'gpt-3.5-turbo',
+                        'max_tokens': 150,
+                        'temperature': 0.3,
+                        'num_keywords': 10
+                    }
+                }
+            },
             
-            # Default distance metric parameters (Hellinger)
-            'distance_metric_type': 'hellinger',
+            # Distance Metric Configuration
+            'distance_metric': {
+                'type': 'hellinger',  # 'hellinger', 'cosine', 'euclidean', 'jensen_shannon'
+                'params': {
+                    'hellinger': {},  # No additional params for Hellinger
+                    'cosine': {'normalize': True},
+                    'euclidean': {'normalize': False},
+                    'jensen_shannon': {'base': 2}
+                }
+            },
             
-            # Default embedding parameters (PHATE)
-            'embedding_method_type': 'PHATE',
-            'phate_n_components': 2,
-            'phate_knn': 5,
-            'phate_gamma': 1.0,
-            'phate_t': 10,
+            # Embedding Configuration
+            'embedding': {
+                'type': 'PHATE',  # 'PHATE', 'UMAP', 'TSNE'
+                'params': {
+                    'phate': {
+                        'n_components': 2,
+                        'knn': 5,
+                        'decay': 40,
+                        'gamma': 1.0,
+                        't': 'auto',
+                        'random_state': 42
+                    },
+                    'umap': {
+                        'n_components': 2,
+                        'n_neighbors': 15,
+                        'min_dist': 0.1,
+                        'metric': 'cosine',
+                        'random_state': 42
+                    },
+                    'tsne': {
+                        'n_components': 2,
+                        'perplexity': 30,
+                        'learning_rate': 200,
+                        'random_state': 42
+                    }
+                }
+            },
             
-            # Analysis parameters
-            'hellinger_knn_neighbors': 10,
-            'ward_linkage_normalize_heights': True,
-            'term_relevancy_lambda': 0.4,
-            'interdisciplinarity_top_topics': 5,
-            'link_anomaly_threshold': 0.1
+            # Mesoscale Configuration (kNN graph construction)
+            'kNN_params': {
+                'local_knn': 5,
+                'meso_knn': 50,
+                'faiss_acceleration': {
+                    'enabled': False,  # Enable FAISS for large datasets
+                    'index_type': 'IndexFlatL2',  # 'IndexFlatL2', 'IndexIVFFlat', 'IndexHNSW'
+                    'min_vectors_for_faiss': 1000,  # Use FAISS only for datasets larger than this
+                }
+            },
+            
+            # Hierarchical Clustering Configuration
+            'clustering': {
+                'linkage_method': 'ward',  # 'ward', 'complete', 'average', 'single'
+                'normalize_heights': True,
+                'distance_threshold': 'auto',  # 'auto' or numeric value
+                'min_cluster_size': 2
+            },
+            
+            # Analysis Configuration
+            'analysis': {
+                'term_relevancy': {
+                    'lambda': 0.4,
+                    'top_terms': 10,
+                    'use_contrastive': False
+                },
+                'interdisciplinarity': {
+                    'top_topics': 5,
+                    'scoring_method': 'entropy',  # 'entropy', 'gini', 'simpson'
+                    'aggregation_method': 'mean'  # 'mean', 'max', 'weighted'
+                },
+                'link_prediction': {
+                    'anomaly_threshold': 0.1,
+                    'prediction_method': 'hrg',  # 'hrg', 'common_neighbors', 'jaccard'
+                    'validation_split': 0.2
+                }
+            },
+            
+            # Processing Configuration
+            'processing': {
+                'multiprocessing': {
+                    'enabled': True,
+                    'n_jobs': -1,  # -1 for all available cores
+                    'chunk_size': 'auto'
+                },
+                'memory_optimization': {
+                    'use_float32': True,  # Use float32 instead of float64 where possible
+                    'batch_processing': True,
+                    'max_batch_size': 1000
+                },
+                'caching': {
+                    'enabled': True,
+                    'cache_embeddings': True,
+                    'cache_distance_matrices': True,
+                    'cache_dir': '.mstml_cache'
+                }
+            },
+            
+            # Logging and Output Configuration
+            'output': {
+                'logging_level': 'INFO',  # 'DEBUG', 'INFO', 'WARNING', 'ERROR'
+                'progress_bars': True,
+                'save_intermediate_results': False,
+                'export_formats': ['json', 'csv', 'pkl'],
+                'figure_format': 'png',  # 'png', 'pdf', 'svg'
+                'figure_dpi': 300
+            }
         }
     
     def _setup_logger(self) -> logging.Logger:

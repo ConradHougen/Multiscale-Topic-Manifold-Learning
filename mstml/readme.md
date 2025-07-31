@@ -2,6 +2,28 @@
 
 This document provides a comprehensive overview of all classes, methods, and functions in the Multi-Scale Topic Manifold Learning (MSTML) package.
 
+## Package Architecture
+
+The MSTML package is organized into several core modules and specialized driver modules:
+
+### Core Modules
+- `core.py` - High-level workflow orchestration and user-friendly wrappers
+- `author_disambiguation.py` - Author name disambiguation and ID assignment
+- `dataframe_schema.py` - DataFrame schema definitions and extractors
+- `data_loaders.py` - Data loading utilities for various formats
+- `text_preprocessing.py` - Comprehensive text processing pipeline
+- `model_evaluation.py` - Topic model evaluation metrics
+- `utils.py` - General utility functions
+
+### Driver Modules (Modular Function Libraries)
+- `_math_driver.py` - Mathematical functions and distance metrics
+- `_graph_driver.py` - Network analysis and graph operations
+- `_embedding_driver.py` - Manifold learning and visualization
+- `_topic_model_driver.py` - Topic modeling and HRG operations
+- `_file_driver.py` - File I/O and directory management
+
+---
+
 ## `author_disambiguation.py`
 
 ### Classes
@@ -143,118 +165,6 @@ Comprehensive text processing pipeline system.
 
 ---
 
-## `gdltm_utils.py`
-
-### Enums
-
-#### `AuthEmbedEnum`
-Author embedding representation types.
-
-**Values:**
-- `WORD_FREQ` - Word frequency embeddings
-- `AT_DISTN` - Author-topic distribution embeddings
-- `AT_SPARSIFIED_DISTN` - Sparsified author-topic distributions
-- `TERM_RELEVANCE_N_HOT` - Term relevance n-hot encoding
-- `TERM_RELEVANCE_VMASK` - Term relevance vocabulary masking
-
-#### `TermRelevanceTopicType`
-Topic representation filtering methods.
-
-**Values:**
-- `N_HOT_ENCODING` - N most relevant terms
-- `VOCAB_MASK` - Union vocabulary masking approach
-
-### Classes
-
-#### `TermRelevanceTopicFilter`
-Topic filtering by term relevance.
-
-**Methods:**
-- `__init__()`
-- `get_topics()`
-- `get_trtt()`
-
-### Functions (120+ utility functions)
-
-**Code Generation & IDs:**
-- `generate_unique_4digit_code()`
-- `generate_colors()`
-- `catalan_number()`
-
-**File & Path Utilities:**
-- `get_file_path_without_extension()`
-- `get_file_stem_only()`
-- `get_net_src_dir()`
-- `get_data_int_dir()`
-- `get_exp_dir()`
-- `create_exp_dir()`
-
-**Author Embeddings:**
-- `author_word_freq_embedding()`
-- `author_topic_distn()`
-- `author_topic_sparsified_distn_embedding()`
-- `author_topics_by_term_relevance_embedding()`
-- `author_vocab_by_term_relevance_embedding()`
-
-**Data Processing:**
-- `filter_dataframe()`
-- `load_filtered_dataframe()`
-- `merge_lists_to_set()`
-- `super_simple_preprocess()`
-- `sent_to_words()`
-- `remove_stopwords()`
-- `filter_stopwords_by_approval()`
-- `lemmatize_and_update()`
-- `lemmatize_mp()`
-
-**Distance & Similarity Metrics:**
-- `kl_divergence()`
-- `js_divergence()`
-- `euclidean()`
-- `hellinger()`
-- `hellinger_sim()`
-- `entropy()`
-- `gini_coefficient()`
-
-**Network Analysis:**
-- `compose_coauthorship_network()`
-- `gen_nx_multigraph_from_dataframe()`
-- `gen_nx_multigraphs_per_year()`
-- `gen_hypergraph()`
-- `get_coauthors()`
-- `fixed_source_label_propagation()`
-
-**Clustering & Analysis:**
-- `hier_cluster()`
-- `assign_clusters()`
-- `find_kth_largest_connected_component()`
-
-**I/O & Serialization:**
-- `write_pickle()`
-- `read_pickle()`
-- `nx_graph_to_pairs_file()`
-- `crop_pdf()`
-
-**Visualization:**
-- `generate_slc_tpc_wordclouds()`
-- `generate_tpc_wordclouds()`
-- `create_and_save_wordcloud()`
-- `graphml_viz_convert()`
-
-**Statistical Analysis:**
-- `stats_local_node_connectivity()`
-- `stats_clustering_coefficients()`
-- `stats_degree_assortativity()`
-- `stats_neighborhood_degree()`
-
-**Filtering Functions:**
-- `filter_all_by_connected_authors()`
-- `filter_all_by_num_publications()`
-- `filter_all_by_connected_component_size()`
-- `filter_all_by_connected_component_density()`
-
----
-
 ## `core.py`
 
 ### Classes
@@ -362,76 +272,15 @@ High-level workflow orchestration for MSTML analysis.
 
 ---
 
-## `mstml_utils.py`
-
-### Functions (60+ specialized MSTML functions)
-
-**Document Processing:**
-- `preprocess_documents()`
-- `expand_doc_topic_distns()`
-- `mstml_term_relevance_stable()`
-- `precompute_weights()`
-
-**Distribution Operations:**
-- `diffuse_distribution()`
-- `compute_new_distribution()`
-- `diffuse_distribution_parallel()`
-- `normalize_vector()`
-
-**Hierarchical Analysis:**
-- `truncate_dendrogram()`
-- `get_leaf_nodes()`
-- `get_new_leaf_nodes()`
-- `find_first_common_parent()`
-- `save_dendrogram_and_index_map()`
-- `load_dendrogram_and_index_map()`
-
-**Author & Link Analysis:**
-- `setup_author_probs_matrix()`
-- `setup_link_prob_matrix()`
-- `compute_link_likelihood_scores()`
-- `calculate_author_distributions()`
-
-**Interdisciplinarity Scoring:**
-- `score_interdisciplinarity()`
-- `calculate_major_n_topic_score()`
-- `compute_interdisciplinarity_score_fast()`
-- `compute_pairwise_interdisciplinarity()`
-
-**Community Detection:**
-- `assign_topic_communities()`
-- `assign_louvain_communities()`
-- `compare_communities_adjusted_rand_index()`
-- `compare_communities_norm_mutual_information()`
-
-**Visualization & Analysis:**
-- `find_centroids_and_create_wordclouds()`
-- `display_wordcloud()`
-- `plot_phate_embedding_with_filtered_chunks()`
-- `plot_wordcloud_for_topic()`
-
-**Path & Smoothing Operations:**
-- `refine_smooth_path()`
-- `select_smooth_path()`
-- `find_max_min_cut_distance()`
-- `rescale_parameter()`
-
-**Mapping & Indexing:**
-- `map_chunk_and_topic_to_chunk_topic_index()`
-- `get_chunk_to_meta_mapping()`
-- `get_meta_topic_distributions()`
-
----
-
 ## `utils.py`
 
 ### Enums
 
 #### `AuthEmbedEnum`
-Author embedding representation types (duplicate of gdltm_utils version).
+Author embedding representation types.
 
 #### `TopicRelevanceEnum`
-Topic representation filtering methods (similar to gdltm_utils version).
+Topic representation filtering methods.
 
 ### Functions
 
@@ -467,6 +316,240 @@ Topic representation filtering methods (similar to gdltm_utils version).
 - `create_time_windows()`
 - `filter_by_frequency()`
 - `compute_topic_coherence()`
+
+---
+
+## Driver Modules
+
+### `_math_driver.py`
+
+**Mathematical Functions and Distance Metrics (30+ functions)**
+
+#### Distance Metrics & Similarity Functions
+- `hellinger()` - Hellinger distance between distributions
+- `hellinger_sim()` - Hellinger similarity measure
+- `euclidean()` - Euclidean distance calculation
+- `kl_divergence()` - Kullback-Leibler divergence
+- `js_divergence()` - Jensen-Shannon divergence
+- `min_weighted_tv()` - Minimum-weighted total variation
+- `mean_weighted_tv()` - Mean-weighted total variation
+- `atoms_term_relevance_stable()` - Stable term relevance computation
+
+#### Statistical Measures
+- `entropy()` - Shannon entropy of distributions
+- `gini_coefficient()` - Gini coefficient calculation
+- `max_weighted_mean()` - Max-weighted mean of vectors
+- `entropy_of_max_weighted_mean()` - Entropy of max-weighted mean
+
+#### Diffusion & Graph Processing
+- `diffuse_distribution()` - Distribution diffusion over graphs
+- `diffuse_distribution_parallel()` - Parallelized diffusion
+- `precompute_weights()` - Graph weight precomputation
+- `compute_new_distribution()` - Single node distribution update
+
+#### Clustering Functions
+- `hier_cluster()` - Hierarchical clustering
+- `assign_clusters()` - Cluster assignment and labeling
+
+#### Utility Functions
+- `rescale_parameter()` - Parameter rescaling
+- `intersection()` - Set intersection operations
+- `pairwise_alignment_score()` - Topic alignment scoring
+- `compute_alignment_scores()` - Multi-chunk alignment analysis
+- `rerank_topic_terms_by_relevance()` - Term relevance reranking
+
+---
+
+### `_graph_driver.py`
+
+**Network Analysis and Graph Operations (40+ functions)**
+
+#### Network Construction & I/O
+- `compose_coauthorship_network()` - Multi-year network composition
+- `gen_nx_multigraphs_per_year()` - Year-based network generation
+- `nx_graph_to_pairs_file()` - NetworkX to pairs file conversion
+- `gen_nx_multigraph_from_dataframe()` - DataFrame to graph conversion
+- `get_coauthors()` - Author collaboration retrieval
+
+#### Hypergraph Functions
+- `gen_hypergraph()` - Hypergraph generation from data
+- `flatten_df_column_with_str_list()` - DataFrame flattening utility
+
+#### Community Detection & Analysis
+- `assign_topic_communities()` - Topic-based community assignment
+- `assign_louvain_communities()` - Louvain method partitioning
+- `compare_communities_adjusted_rand_index()` - ARI comparison
+- `compare_communities_norm_mutual_information()` - NMI comparison
+- `fixed_source_label_propagation()` - Constrained label propagation
+
+#### Network Analysis & Metrics
+- `find_kth_largest_connected_component()` - Component analysis
+- `topic_space_dist_vs_path_length()` - Distance-path relationship
+- `topic_space_dist_vs_path_len_for_non_overlapping_max_paths()` - Non-overlapping path analysis
+
+#### Link Prediction & Evaluation
+- `lp_expA_score()` - F1 score computation for link prediction
+
+#### Graph File Format Conversion
+- `graphml_viz_convert()` - Visualization format conversion
+- `graphml_viz_convert_file()` - Single file conversion
+- `convert_viz_graphml_to_pairs_file()` - GraphML to pairs conversion
+- `atoms_read_graphml_to_netx()` - GraphML reader wrapper
+
+#### Helper Functions
+- `get_fname_for_single_yr_graph()` - Single year filename generation
+- `get_fname_for_graph_composition()` - Composition filename generation
+- `is_n_tuple()` - Tuple validation utility
+
+---
+
+### `_embedding_driver.py`
+
+**Manifold Learning and Visualization (25+ functions)**
+
+#### PHATE & Path Selection Functions
+- `select_smooth_path()` - Smooth path selection in embeddings
+- `refine_smooth_path()` - Path smoothing and refinement
+
+#### Visualization Functions
+- `generate_colors()` - Perceptually uniform color generation
+- `plot_phate_embedding_with_filtered_chunks()` - Interactive PHATE plotting
+- `plot_wordcloud_for_topic()` - Topic-specific word cloud generation
+
+#### Word Cloud Functions
+- `find_centroids_and_create_wordclouds()` - Cluster centroid word clouds
+- `display_wordcloud()` - Word cloud display utility
+- `create_and_save_wordcloud()` - Dataset word cloud creation
+- `generate_slc_tpc_wordclouds()` - Slice-topic word clouds
+- `generate_tpc_wordclouds()` - Topic word cloud generation
+
+#### Utility Functions for Embeddings
+- `convert_slc_tpc_idx_to_yr_and_tpc_idx()` - Index conversion utilities
+
+---
+
+### `_topic_model_driver.py`
+
+**Topic Modeling and HRG Operations (50+ functions)**
+
+#### Enums & Classes
+- `AuthEmbedEnum` - Author embedding types
+- `TermRelevanceTopicType` - Topic relevance filtering methods
+- `TermRelevanceTopicFilter` - Topic filtering by term relevance
+
+#### Document & Corpus Processing
+- `preprocess_documents()` - Document preprocessing
+- `expand_doc_topic_distns()` - Topic distribution expansion
+- `map_chunk_and_topic_to_chunk_topic_index()` - Index mapping
+- `count_unique_topics_or_categories()` - Topic counting utilities
+
+#### Author Embedding Functions
+- `author_word_freq_embedding()` - Word frequency embeddings
+- `author_topic_distn()` - Author-topic distributions
+- `author_topic_sparsified_distn_embedding()` - Sparsified embeddings
+- `author_topics_by_term_relevance_embedding()` - Term relevance embeddings
+- `author_vocab_by_term_relevance_embedding()` - Vocabulary-filtered embeddings
+
+#### HRG & Dendrogram Functions
+- `find_max_min_cut_distance()` - Cut distance analysis
+- `truncate_dendrogram()` - Dendrogram truncation
+- `get_leaf_nodes()` - Leaf node extraction
+- `get_new_leaf_nodes()` - New leaf node identification
+- `find_first_common_parent()` - Tree traversal utilities
+- `setup_author_probs_matrix()` - Author probability matrix setup
+- `setup_link_prob_matrix()` - Link probability matrix setup
+- `compute_link_likelihood_scores()` - Link likelihood computation
+- `save_dendrogram_and_index_map()` - Dendrogram serialization
+- `load_dendrogram_and_index_map()` - Dendrogram deserialization
+
+#### Interdisciplinarity & Analysis Functions
+- `calculate_author_distributions()` - Author distribution calculation
+- `score_interdisciplinarity()` - Interdisciplinarity scoring
+- `calculate_major_n_topic_score()` - Major topic scoring
+
+#### Utility Functions
+- `get_nth_item_from_ordered_dict()` - OrderedDict utilities
+- `get_doc_set_from_author_team()` - Document set retrieval
+- `calculate_rank_correlations()` - Kendall's Tau correlations
+- `get_top_percent()` - Top percentage extraction
+
+---
+
+### `_file_driver.py`
+
+**File I/O and Directory Management (80+ functions)**
+
+#### Directory & Path Management
+- `get_net_src_dir()` - Network source directory
+- `get_data_int_dir()` - Intermediate data directory
+- `get_data_original_dir()` - Original data directory
+- `get_data_intermediate_dir()` - Intermediate directory with subdirectories
+- `get_data_networks_dir()` - Networks directory with subdirectories
+- `get_exp_dir()` - Experiment directory generation
+- `initialize_dataset_directories()` - Complete directory initialization
+- `remove_empty_folders()` - Empty folder cleanup
+- `create_exp_dir()` - Experiment directory creation
+
+#### File I/O Operations
+- `write_pickle()` - Pickle file writing with overwrite control
+- `read_pickle()` - Pickle file reading
+- `atoms_print()` - Dual console/file printing
+
+#### Time & Naming Utilities
+- `generate_unique_4digit_code()` - Time-based unique codes
+- `get_date_hour_minute()` - Date-time string generation
+- `get_hour_minute()` - Hour-minute time strings
+- `get_hour_minute_second()` - Hour-minute-second strings
+- `gen_time_str()` - Unique time strings
+- `gen_date_str()` - Date-only strings
+- `get_lda_model_file_name()` - LDA model naming
+
+#### Path & File Utilities
+- `get_file_path_without_extension()` - Extension-free paths
+- `get_file_stem_only()` - Filename stem extraction
+- `catalan_number()` - Catalan number computation
+
+#### Parameter Management
+- `init_inds()` - Parameter index initialization
+- `incr_inds()` - Parameter index incrementation
+- `gen_dir_suffix()` - Directory suffix generation
+- `get_key()` - Dictionary key lookup
+
+#### Data Processing Utilities
+- `filter_dataframe()` - DataFrame filtering by constraints
+- `load_filtered_dataframe()` - Filtered DataFrame loading
+- `get_authorId2doc()` - Author ID to document mapping
+- `get_author2doc()` - Author name to document mapping
+- `merge_lists_to_set()` - List merging to sets
+
+#### Text Processing Utilities
+- `super_simple_preprocess()` - Simple text preprocessing
+- `sent_to_words()` - Sentence tokenization
+- `filter_list_bisect()` - Bisect-based filtering
+- `remove_stopwords()` - Stopword removal
+- `filter_stopwords_by_approval()` - Approved word filtering
+- `remove_singly_occurring_words()` - Rare word removal
+- `lemmatize_and_update()` - Lemmatization with vocabulary update
+- `lemmatize_mp()` - Multiprocessing lemmatization
+- `count_doc_freq_of_words()` - Document frequency counting
+- `filter_terms()` - Vocabulary-based term filtering
+
+#### PDF Operations
+- `crop_pdf()` - PDF cropping with dimension validation
+
+#### Data Filtering & Analysis Utilities
+- `filter_doc_df_by_specified_authors()` - Author-based filtering
+- `filter_all_by_connected_authors()` - Connected author filtering
+- `filter_all_by_num_publications()` - Publication count filtering
+- `filter_all_by_num_direct_coauthors()` - Coauthor degree filtering
+- `filter_all_by_connected_component_size()` - Component size filtering
+- `filter_all_by_connected_component_density()` - Component density filtering
+
+#### Statistics & Analysis Functions (Placeholders)
+- `stats_local_node_connectivity()` - Node connectivity statistics
+- `stats_clustering_coefficients()` - Clustering coefficient statistics
+- `stats_degree_assortativity()` - Degree assortativity statistics
+- `stats_neighborhood_degree()` - Neighborhood degree statistics
 
 ---
 
