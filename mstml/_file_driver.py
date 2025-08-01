@@ -224,30 +224,6 @@ def read_pickle(file_path):
         return pickle.load(f)
 
 
-def save_pickle(obj, filepath):
-    """Save object to pickle file."""
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    with open(filepath, 'wb') as f:
-        pickle.dump(obj, f)
-
-
-def load_pickle(filepath):
-    """Load object from pickle file."""
-    with open(filepath, 'rb') as f:
-        return pickle.load(f)
-
-
-def atoms_print(str_to_print, fpath, force_overwrite=False):
-    """Function to both print to console and write out to file"""
-    if not os.path.exists(fpath) or force_overwrite:
-        with open(fpath, 'w') as f:
-            print(str_to_print, file=f)
-    else:
-        with open(fpath, 'a') as f:
-            print(str_to_print, file=f)
-    print(str_to_print)
-
-
 # ============================================================================
 # Time and Naming Utilities
 # ============================================================================

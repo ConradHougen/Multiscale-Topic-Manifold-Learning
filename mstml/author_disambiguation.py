@@ -2,8 +2,7 @@ import numpy as np
 import pandas as pd
 import random
 import re
-import pickle
-import logging
+from ._file_driver import log_print, write_pickle, read_pickle
 import os
 from itertools import groupby
 from operator import itemgetter
@@ -72,7 +71,7 @@ class AuthorDisambiguator:
         random.shuffle(self._id_pool)
         self._pool_index = 0
         
-        logging.debug(f"Initialized ID pool with {len(self._id_pool)} IDs ({self._current_id_digits} digits)")
+        log_print(f"Initialized ID pool with {len(self._id_pool)} IDs ({self._current_id_digits} digits)", level="debug")
     
     def _expand_id_pool(self) -> None:
         """
@@ -87,7 +86,7 @@ class AuthorDisambiguator:
         # Reinitialize pool with new digit length
         self._initialize_id_pool()
         
-        logging.info(f"Expanded ID pool from {old_digits} to {self._current_id_digits} digits")
+        log_print(f"Expanded ID pool from {old_digits} to {self._current_id_digits} digits", level="info")
     
     def _get_next_id(self) -> int:
         """
@@ -114,11 +113,11 @@ class AuthorDisambiguator:
                 return candidate_id
             else:
                 # Collision detected - this ID is already in use
-                logging.debug(f"ID collision detected for {candidate_id}, trying next")
+                log_print(f"ID collision detected for {candidate_id}, trying next", level="debug")
                 continue
         
         # If we've exhausted the current pool, expand to next digit length
-        logging.info("Current ID pool exhausted, expanding to next digit length")
+        log_print("Current ID pool exhausted, expanding to next digit length", level="info")
         self._expand_id_pool()
         
         # Try again with expanded pool
@@ -170,7 +169,7 @@ class AuthorDisambiguator:
             self._expand_id_pool()
             available_ids = len(self._id_pool) - self._pool_index
             
-        logging.debug(f"Pool has {available_ids} available IDs for estimated need of {estimated_ids_needed}")
+        log_print(f"Pool has {available_ids} available IDs for estimated need of {estimated_ids_needed}", level="debug")
 
     def update_dataframe(self, df: pd.DataFrame, author_names_column: str) -> pd.Series:
         """
@@ -214,7 +213,7 @@ class AuthorDisambiguator:
                 valid_indices.append(idx)
                 filtered_author_lists.append(authors)
             else:
-                logging.warning(f"Skipping document at index {idx} with {len(authors)} authors (max: {self.max_authors_per_doc})")
+                log_print(f"Skipping document at index {idx} with {len(authors)} authors (max: {self.max_authors_per_doc})", level="warning")
         
         # Perform disambiguation on valid author lists
         if not self._is_fitted:
@@ -261,7 +260,7 @@ class AuthorDisambiguator:
         except Exception as e:
             raise RuntimeError(f"Failed during author extraction and standardization: {e}")
         
-        logging.info(f"Number of authors prior to disambiguation: {len(unique_authors)}")
+        log_print(f"Number of authors prior to disambiguation: {len(unique_authors)}", level="info")
         
         # Estimate required IDs and ensure sufficient pool size
         estimated_ids = self._estimate_required_ids(author_lists)
@@ -276,7 +275,7 @@ class AuthorDisambiguator:
         # Assign unique IDs based on matches
         self.author_name_to_id, self.author_id_to_names = self._assign_author_ids(authors_split, fmatch_results)
         
-        logging.info(f"Number of authors after disambiguation: {len(self.author_id_to_names)}")
+        log_print(f"Number of authors after disambiguation: {len(self.author_id_to_names)}", level="info")
         
         self._is_fitted = True
         return self
@@ -301,12 +300,12 @@ class AuthorDisambiguator:
         
         for i, authors in enumerate(author_lists):
             if not isinstance(authors, list):
-                logging.warning(f"Skipping non-list entry at index {i}: {type(authors)}")
+                log_print(f"Skipping non-list entry at index {i}: {type(authors)}", level="warning")
                 continue
                 
             for author in authors:
                 if not isinstance(author, str):
-                    logging.warning(f"Skipping non-string author at index {i}: {type(author)}")
+                    log_print(f"Skipping non-string author at index {i}: {type(author)}", level="warning")
                     continue
                     
                 author = author.strip()
@@ -346,7 +345,7 @@ class AuthorDisambiguator:
             if group_list:  # Only add non-empty groups
                 authors_split.append(group_list)
             
-        logging.info(f"Number of unique prefixes: {len(authors_split)}")
+        log_print(f"Number of unique prefixes: {len(authors_split)}", level="info")
         return authors_split
     
     def _compute_fuzzy_matches(self, authors_split: List[List[str]]) -> List[Tuple]:
@@ -370,7 +369,7 @@ class AuthorDisambiguator:
         
         for split_idx, author_group in enumerate(authors_split):
             if not author_group:
-                logging.warning(f"Empty author group at index {split_idx}, skipping")
+                log_print(f"Empty author group at index {split_idx}, skipping", level="warning")
                 continue
                 
             try:
@@ -382,7 +381,7 @@ class AuthorDisambiguator:
                 tf_idf_matrix = vectorizer.fit_transform(author_group)
                 
                 if tf_idf_matrix.shape[0] == 0:
-                    logging.warning(f"Empty TF-IDF matrix for group {split_idx}, skipping")
+                    log_print(f"Empty TF-IDF matrix for group {split_idx}, skipping", level="warning")
                     continue
                 
                 # Compute similarity matrix
@@ -394,14 +393,14 @@ class AuthorDisambiguator:
                     self.similarity_threshold
                 )
                 
-                logging.debug(f"Group {split_idx}: matrix shape {tf_idf_matrix.shape}, matches {matches.nnz}")
+                log_print(f"Group {split_idx}: matrix shape {tf_idf_matrix.shape}, matches {matches.nnz}", level="debug")
                 
                 # Convert to find() format
                 match_result = find(matches)
                 fmatch_results.append(match_result)
                 
             except Exception as e:
-                logging.error(f"Failed to compute matches for group {split_idx}: {e}")
+                log_print(f"Failed to compute matches for group {split_idx}: {e}", level="error")
                 raise RuntimeError(f"Similarity computation failed for group {split_idx}: {e}")
             
         return fmatch_results
@@ -434,7 +433,7 @@ class AuthorDisambiguator:
                     
                 # Validate fmatch structure
                 if not isinstance(fmatch, tuple) or len(fmatch) != 3:
-                    logging.warning(f"Invalid fmatch structure, skipping group")
+                    log_print(f"Invalid fmatch structure, skipping group", level="warning")
                     continue
                     
                 for auth_idx, auth_name in enumerate(author_group):
@@ -461,7 +460,7 @@ class AuthorDisambiguator:
                                 author_id_to_names[auth_id].append(name)
                                 
                     except (IndexError, TypeError) as e:
-                        logging.warning(f"Error processing author '{auth_name}' at index {auth_idx}: {e}")
+                        log_print(f"Error processing author '{auth_name}' at index {auth_idx}: {e}", level="warning")
                         continue
                         
         except Exception as e:
@@ -492,7 +491,7 @@ class AuthorDisambiguator:
         
         for author in authors:
             if not isinstance(author, str):
-                logging.warning(f"Skipping non-string author: {type(author)}")
+                log_print(f"Skipping non-string author: {type(author)}", level="warning")
                 continue
                 
             author = author.strip()
@@ -510,7 +509,7 @@ class AuthorDisambiguator:
             if standardized in self.author_name_to_id:
                 author_ids.append(self.author_name_to_id[standardized])
             else:
-                logging.warning(f"Author '{standardized}' not found in mapping")
+                log_print(f"Author '{standardized}' not found in mapping", level="warning")
                 
         return author_ids
     
@@ -537,11 +536,9 @@ class AuthorDisambiguator:
             name_to_id_path = os.path.join(directory, 'author_name_to_id.pkl')
             id_to_names_path = os.path.join(directory, 'author_id_to_names.pkl')
             
-            with open(name_to_id_path, 'wb') as f:
-                pickle.dump(self.author_name_to_id, f)
+            write_pickle(self.author_name_to_id, name_to_id_path)
                 
-            with open(id_to_names_path, 'wb') as f:
-                pickle.dump(self.author_id_to_names, f)
+            write_pickle(self.author_id_to_names, id_to_names_path)
             
             # Save ID pool state
             pool_state_path = os.path.join(directory, 'id_pool_state.pkl')
@@ -552,10 +549,9 @@ class AuthorDisambiguator:
                 'initial_id_digits': self.initial_id_digits
             }
             
-            with open(pool_state_path, 'wb') as f:
-                pickle.dump(pool_state, f)
+            write_pickle(pool_state, pool_state_path)
                 
-            logging.info(f"Saved author mappings and ID pool state to {directory}")
+            log_print(f"Saved author mappings and ID pool state to {directory}", level="info")
             
         except Exception as e:
             raise RuntimeError(f"Failed to save mappings to {directory}: {e}")
@@ -588,11 +584,9 @@ class AuthorDisambiguator:
             
         try:
             # Load mapping dictionaries
-            with open(name_to_id_path, 'rb') as f:
-                loaded_name_to_id = pickle.load(f)
+            loaded_name_to_id = read_pickle(name_to_id_path)
                 
-            with open(id_to_names_path, 'rb') as f:
-                loaded_id_to_names = pickle.load(f)
+            loaded_id_to_names = read_pickle(id_to_names_path)
                 
             # Validate loaded mapping data
             if not isinstance(loaded_name_to_id, dict):
@@ -608,8 +602,7 @@ class AuthorDisambiguator:
             
             # Load ID pool state if available
             if os.path.exists(pool_state_path):
-                with open(pool_state_path, 'rb') as f:
-                    pool_state = pickle.load(f)
+                pool_state = read_pickle(pool_state_path)
                     
                 # Validate and restore pool state
                 if isinstance(pool_state, dict):
@@ -621,16 +614,16 @@ class AuthorDisambiguator:
                     if 'initial_id_digits' in pool_state:
                         self.initial_id_digits = pool_state['initial_id_digits']
                         
-                    logging.info(f"Restored ID pool state: {self._current_id_digits} digits, index {self._pool_index}")
+                    log_print(f"Restored ID pool state: {self._current_id_digits} digits, index {self._pool_index}", level="info")
                 else:
-                    logging.warning("Invalid pool state format, reinitializing pool")
+                    log_print("Invalid pool state format, reinitializing pool", level="warning")
                     self._initialize_id_pool()
             else:
-                logging.warning("No pool state file found, reinitializing pool")
+                log_print("No pool state file found, reinitializing pool", level="warning")
                 self._initialize_id_pool()
             
             self._is_fitted = True
-            logging.info(f"Loaded author mappings from {directory}")
+            log_print(f"Loaded author mappings from {directory}", level="info")
             
         except Exception as e:
             raise RuntimeError(f"Failed to load mappings from {directory}: {e}")
@@ -651,13 +644,13 @@ class AuthorDisambiguator:
         if df is None or df.empty:
             return  # Nothing to sync
         if author_ids_column not in df.columns:
-            logging.debug(f"Column '{author_ids_column}' not found, skipping sync")
+            log_print(f"Column '{author_ids_column}' not found, skipping sync", level="debug")
             return
         
         # Corresponding author names column
         author_names_column = author_ids_column.replace('_ids', '_names').replace('author_ids', 'author_names')
         if author_names_column not in df.columns:
-            logging.debug(f"Corresponding names column '{author_names_column}' not found, partial sync only")
+            log_print(f"Corresponding names column '{author_names_column}' not found, partial sync only", level="debug")
             author_names_column = None
             
         try:
@@ -699,7 +692,7 @@ class AuthorDisambiguator:
                     for name in names_set:
                         self.author_name_to_id[name] = aid
                     new_mappings_count += 1
-                    logging.debug(f"Added new mapping from dataframe: ID {aid} -> {list(names_set)}")
+                    log_print(f"Added new mapping from dataframe: ID {aid} -> {list(names_set)}", level="debug")
                 else:
                     # Existing ID - merge names
                     existing_names = set(self.author_id_to_names[aid])
@@ -708,7 +701,7 @@ class AuthorDisambiguator:
                         self.author_id_to_names[aid].extend(list(new_names))
                         for name in new_names:
                             self.author_name_to_id[name] = aid
-                        logging.debug(f"Added names to existing ID {aid}: {list(new_names)}")
+                        log_print(f"Added names to existing ID {aid}: {list(new_names)}", level="debug")
             
             # 3. Remove mappings for IDs no longer present in dataframe
             # Only do this if we have a complete picture (both IDs and names columns exist)
@@ -736,20 +729,20 @@ class AuthorDisambiguator:
                         self._used_ids.discard(aid)
                 
                 if removed_ids:
-                    logging.info(f"Removed {len(removed_ids)} IDs no longer in dataframe: {sorted(removed_ids)}")
-                    logging.debug(f"Removed names: {sorted(removed_names)}")
+                    log_print(f"Removed {len(removed_ids)} IDs no longer in dataframe: {sorted(removed_ids)}", level="info")
+                    log_print(f"Removed names: {sorted(removed_names)}", level="debug")
             
             # Log summary
             if new_used_count > old_used_count or new_mappings_count > 0 or removed_ids:
-                logging.info(f"Dataframe sync complete: "
+                log_print(f"Dataframe sync complete: "
                            f"+{new_used_count - old_used_count} used IDs, "
                            f"+{new_mappings_count} new mappings, "
-                           f"-{len(removed_ids)} removed mappings")
+                           f"-{len(removed_ids)} removed mappings", level="info")
             else:
-                logging.debug("Dataframe sync: no changes needed")
+                log_print("Dataframe sync: no changes needed", level="debug")
                 
         except Exception as e:
-            logging.warning(f"Failed to sync with dataframe IDs: {e}")
+            log_print(f"Failed to sync with dataframe IDs: {e}", level="warning")
     
     def sync_with_dataframe_ids(self, df: pd.DataFrame, author_ids_column: str) -> None:
         """
@@ -815,7 +808,7 @@ class AuthorDisambiguator:
             ngrams_list = zip(*[string[i:] for i in range(n)])
             return [''.join(ngram) for ngram in ngrams_list]
         except Exception as e:
-            logging.warning(f"Error generating n-grams for string '{string}': {e}")
+            log_print(f"Error generating n-grams for string '{string}': {e}", level="warning")
             return []
 
     def get_mapping_stats(self) -> Dict[str, int]:

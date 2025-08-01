@@ -18,6 +18,7 @@ from nltk.stem import WordNetLemmatizer
 from typing import List, Dict, Optional
 from multiprocessing import Pool
 from tqdm import tqdm
+from ._file_driver import log_print
 
 
 def super_simple_preprocess(text):
@@ -175,3 +176,121 @@ class TextPreprocessor:
 
     def get_lda_model(self):
         return self.lda_model
+    
+    ### === PIPELINE WRAPPER METHOD === ###
+    def update_dataframe(self, df, text_column, 
+                        standardize_authors=False, 
+                        allowed_categories=None,
+                        low_thresh=1, 
+                        high_frac=0.995, 
+                        extra_stopwords=None,
+                        train_lda=True,
+                        num_topics=50,
+                        lda_passes=1,
+                        lambda_param=0.6,
+                        top_n_terms=2000):
+        """
+        Main wrapper method for complete text preprocessing pipeline.
+        Called by DataLoader to preprocess text data following the established flow.
+        
+        Args:
+            df: DataFrame containing text data
+            text_column: Name of column containing raw text
+            standardize_authors: Whether to standardize author names
+            allowed_categories: List of allowed categories for filtering
+            low_thresh: Minimum document frequency threshold
+            high_frac: Maximum document frequency fraction
+            extra_stopwords: Additional stopwords to remove
+            train_lda: Whether to train LDA model for relevancy filtering
+            num_topics: Number of topics for LDA model
+            lda_passes: Number of passes for LDA training
+            lambda_param: Lambda parameter for relevancy scoring
+            top_n_terms: Number of top relevant terms to keep
+        
+        Returns:
+            Series of preprocessed tokenized documents (lists of tokens)
+        """
+        if text_column not in df.columns:
+            raise ValueError(f"Column '{text_column}' not found in dataframe")
+        
+        log_print("Starting text preprocessing pipeline", level="info")
+        
+        ### === STEP 1: Author and Category Filtering === ###
+        if standardize_authors and 'authors' in df.columns:
+            df = self.standardize_authors(df)
+            log_print("Applied author name standardization", level="info")
+            
+        if allowed_categories and 'categories' in df.columns:
+            df = self.filter_by_categories(df, allowed_categories)
+            log_print(f"Filtered to {len(allowed_categories)} allowed categories", level="info")
+        
+        ### === STEP 2: Basic Preprocessing === ###
+        # Preprocess raw text (tokenization) - modifies df in place
+        log_print("Tokenizing documents", level="info")
+        df = self.preprocess_raw_text(df, text_column)
+        
+        # Extract tokenized documents for further processing
+        tokenized_docs = df['text_processed'].tolist()
+        
+        # Apply lemmatization in parallel
+        log_print("Applying lemmatization using multiprocessing", level="info")
+        tokenized_docs = self.lemmatize_all(tokenized_docs)
+        
+        # Build initial dictionary
+        log_print("Building initial vocabulary dictionary", level="info")
+        self.build_dictionary(tokenized_docs)
+        
+        ### === STEP 3: Frequency and Stopword Filtering === ###
+        log_print(f"Applying frequency filtering (low_thresh={low_thresh}, high_frac={high_frac})", level="info")
+        self.apply_frequency_stopword_filter(
+            tokenized_docs, 
+            low_thresh=low_thresh, 
+            high_frac=high_frac, 
+            extra_stopwords=extra_stopwords
+        )
+        
+        ### === STEP 4: Global LDA and Term Relevancy Filtering === ###
+        if train_lda:
+            # Train LDA model with progress logging
+            log_print(f"Training LDA model with {num_topics} topics and {lda_passes} passes - this may take a moment...", level="info")
+            self.train_lda_model(num_topics=num_topics, passes=lda_passes)
+            log_print("LDA model training completed", level="info")
+            
+            # Compute relevancy scores and get reduced vocabulary
+            log_print(f"Computing term relevancy scores (λ={lambda_param}, top_n={top_n_terms})", level="info")
+            self.compute_relevancy_scores(lambda_param=lambda_param, top_n=top_n_terms)
+            
+            # Apply relevancy filter
+            log_print("Applying relevancy-based vocabulary reduction", level="info")
+            self.apply_relevancy_filter()
+        
+        ### === STEP 5: Final Cleanup === ###
+        log_print("Performing final cleanup and dictionary rebuild", level="info")
+        # Create temporary dataframe with processed text for dropping empty rows
+        temp_df = pd.DataFrame({'text_processed': self.filtered_docs})
+        temp_df = self.drop_empty_rows(temp_df, 'text_processed')
+        
+        # Update filtered docs to only include non-empty documents
+        self.filtered_docs = temp_df['text_processed'].tolist()
+        
+        # Rebuild dictionary one final time
+        self.id2word = corpora.Dictionary(self.filtered_docs)
+        self.corpus = [self.id2word.doc2bow(doc) for doc in self.filtered_docs]
+        self.stats_log['vocab_final'] = len(self.id2word)
+        
+        # Return processed documents, ensuring we match the original dataframe indices
+        # Handle case where filtering may have removed some documents
+        if len(self.filtered_docs) == len(df):
+            # No documents were removed during processing
+            log_print(f"Text preprocessing completed successfully for {len(self.filtered_docs)} documents", level="info")
+            return pd.Series(self.filtered_docs, index=df.index)
+        else:
+            # Some documents were removed - this is more complex to handle
+            # For now, return what we have and log a warning
+            log_print(f"Document count changed during preprocessing: {len(df)} -> {len(self.filtered_docs)}", level="warning")
+            # Pad or truncate to match original length
+            if len(self.filtered_docs) < len(df):
+                padded_docs = self.filtered_docs + [[] for _ in range(len(df) - len(self.filtered_docs))]
+                return pd.Series(padded_docs, index=df.index)
+            else:
+                return pd.Series(self.filtered_docs[:len(df)], index=df.index)

@@ -9,20 +9,63 @@ import numpy as np
 import pandas as pd
 import logging
 import os
+import re
 import json  # For metadata
 import datetime as dt
 import pandas.api.types as ptypes
+import multiprocessing as mp
 from abc import ABC, abstractmethod
 
+import gensim
+import gensim.corpora as corpora
+import networkx as nx
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+
 from typing import Optional, Union, Dict, Any, List, Tuple
+from collections import defaultdict
+from itertools import combinations
+
+# Optional imports with fallbacks
+try:
+    import phate
+    PHATE_AVAILABLE = True
+except ImportError:
+    PHATE_AVAILABLE = False
+
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+except ImportError:
+    FAISS_AVAILABLE = False
 
 from .dataframe_schema import FieldDef, MainDataSchema
-from .data_loaders import get_project_root_directory, get_data_directory, JsonDataLoader
+from .data_loaders import get_project_root_directory, get_data_directory, JsonDataLoader, DataLoader
+from .author_disambiguation import AuthorDisambiguator
+from .text_preprocessing import TextPreprocessor
 from ._embedding_driver import *
 from ._file_driver import *
 from ._graph_driver import *
+from ._graph_driver import (
+    build_coauthor_network_from_dataframe,
+    build_temporal_coauthor_networks_from_dataframe, 
+    compose_networks_from_dict
+)
 from ._math_driver import *
 from ._topic_model_driver import *
+
+# Additional imports for methods
+import pickle
+from datetime import datetime
+from gensim.models import LdaModel, CoherenceModel
+from gensim.corpora import Dictionary
+from scipy.spatial.distance import pdist, squareform
+from scipy.cluster.hierarchy import linkage, dendrogram
+from scipy.stats import entropy
+from collections import OrderedDict
+from ._math_driver import hellinger, diffuse_distribution
+from ._topic_model_driver import setup_author_probs_matrix
+from .fast_encode_tree import fast_encode_tree_structure
 
 """============================================================================
 Abstract Base Classes for Modular MSTML Components
@@ -223,9 +266,8 @@ class LDATopicModel(UnitTopicModel):
     
     def fit(self, documents: List[str], vocabulary: Optional[Dict[str, int]] = None) -> 'LDATopicModel':
         try:
-            from gensim import corpora
-            from gensim.models import LdaModel
-            import gensim
+            # Check if gensim is available
+            corpora.Dictionary([])
         except ImportError:
             raise ImportError("Gensim not installed. Install with: pip install gensim")
         
@@ -335,7 +377,6 @@ class LDATopicModel(UnitTopicModel):
             raise ValueError("Model not fitted. Call fit() first.")
         
         try:
-            from gensim.models import CoherenceModel
             
             # Recreate tokenized documents for coherence calculation
             tokenized_docs = [[self.dictionary[word_id] for word_id, _ in doc] 
@@ -494,9 +535,7 @@ class PHATEEmbedding(LowDimEmbedding):
     
     def fit_transform(self, X: np.ndarray, 
                      distance_metric: Optional[EmbeddingDistanceMetric] = None) -> np.ndarray:
-        try:
-            import phate
-        except ImportError:
+        if not PHATE_AVAILABLE:
             raise ImportError("PHATE not installed. Install with: pip install phate")
         
         # Use custom distance metric if provided
@@ -661,6 +700,7 @@ class MstmlOrchestrator:
         self.vocabulary = None
         self.global_lda_model = None  # For term relevancy filtering
         self.preprocessed_corpus = None
+        self.text_preprocessor = None
         
         # Temporal ensemble components
         self.time_chunks = []
@@ -719,177 +759,150 @@ class MstmlOrchestrator:
     
     def load_data(self, 
                   data_source: str,
-                  schema_config: Optional[dict] = None,
-                  force_reload: bool = False) -> 'MstmlOrchestrator':
+                  dataset_name: Optional[str] = None,
+                  author_disambiguation: bool = True,
+                  overwrite: bool = False) -> 'MstmlOrchestrator':
         """
-        Load and validate document corpus data.
+        Load and validate document corpus data using DataLoader pipeline.
         
         Args:
             data_source: Path to data file or identifier
-            schema_config: Custom schema configuration
-            force_reload: Force reload even if data exists
+            dataset_name: Name for the dataset (auto-generated if not provided)
+            author_disambiguation: Whether to apply author disambiguation
+            overwrite: Whether to overwrite existing processed data
         
         Returns:
             Self for method chaining
         """
-        from .data_loaders import JsonDataLoader, get_data_directory
-        from .dataframe_schema import MainDataSchema, FieldDef
-        from collections import defaultdict
-        import pandas as pd
-        
-        # Skip loading if already loaded (unless force_reload)
-        if self.documents_df is not None and not force_reload:
-            self.logger.info("Data already loaded. Use force_reload=True to reload.")
+        # Skip loading if already loaded (unless overwrite)
+        if self.documents_df is not None and not overwrite:
+            self.logger.info("Data already loaded. Use overwrite=True to reload.")
             return self
             
         self.logger.info(f"Loading data from {data_source}")
         
-        # Initialize schema with custom config if provided
-        if schema_config:
-            # Create schema from config
-            field_defs = {}
-            for field_name, field_config in schema_config.items():
-                field_defs[field_name] = FieldDef(
-                    name=field_name,
-                    data_type=field_config.get('data_type', str),
-                    required=field_config.get('required', False),
-                    extractor_func=field_config.get('extractor_func')
-                )
-            self.schema = MainDataSchema(field_defs)
-        else:
-            # Use default schema for academic documents
-            self.schema = MainDataSchema({
-                'title': FieldDef('title', str, required=True),
-                'abstract': FieldDef('abstract', str, required=True), 
-                'authors': FieldDef('authors', list, required=True),
-                'date': FieldDef('date', str, required=True),
-                'keywords': FieldDef('keywords', list, required=False),
-                'venue': FieldDef('venue', str, required=False)
-            })
+        # Generate dataset name if not provided
+        if dataset_name is None:
+            dataset_name = os.path.splitext(os.path.basename(data_source))[0]
         
-        # Initialize appropriate data loader based on file extension
+        # Initialize author disambiguator if requested
+        disambiguator = AuthorDisambiguator() if author_disambiguation else None
+        
+        # Create data loader based on file extension
         if data_source.endswith('.json'):
-            self.data_loader = JsonDataLoader(data_source, self.schema)
+            self.data_loader = JsonDataLoader(
+                input_path=data_source,
+                dataset_name=dataset_name,
+                overwrite=overwrite,
+                author_disambiguator=disambiguator
+            )
         else:
             raise ValueError(f"Unsupported data format for {data_source}")
         
-        # Load and validate documents
-        self.documents_df = self.data_loader.load_data()
+        # Run the complete data loading pipeline
+        self.data_loader.run()
+        
+        # Get the processed dataframes
+        self.documents_df = self.data_loader.get_clean_df()
         self.logger.info(f"Loaded {len(self.documents_df)} documents")
-        
-        # Extract author information and create authors dataframe
-        author_data = defaultdict(list)
-        author_doc_counts = defaultdict(int)
-        author_names = {}
-        
-        for idx, row in self.documents_df.iterrows():
-            authors = row.get('authors', [])
-            if isinstance(authors, str):
-                authors = [authors]  # Handle single author case
-            
-            for author in authors:
-                if isinstance(author, dict):
-                    author_id = author.get('id', author.get('name', str(author)))
-                    author_name = author.get('name', str(author))
-                else:
-                    author_id = str(author)
-                    author_name = str(author)
-                
-                author_names[author_id] = author_name
-                author_data['author_id'].append(author_id)
-                author_data['document_id'].append(idx)
-                author_doc_counts[author_id] += 1
-        
-        # Create authors dataframe with publication counts
-        unique_authors = []
-        for author_id, name in author_names.items():
-            unique_authors.append({
-                'author_id': author_id,
-                'name': name,
-                'publication_count': author_doc_counts[author_id]
-            })
-        
-        self.authors_df = pd.DataFrame(unique_authors)
-        self.logger.info(f"Extracted {len(self.authors_df)} unique authors")
         
         return self
     
     def setup_coauthor_network(self, 
-                              author_disambiguation: bool = True,
-                              min_collaborations: int = 1) -> 'MstmlOrchestrator':
+                              min_collaborations: int = 1,
+                              temporal: bool = False,
+                              degree_limits: Optional[tuple] = None) -> 'MstmlOrchestrator':
         """
-        Create co-author network from loaded document data.
+        Create co-author network from loaded document data using _graph_driver functions.
+        Authors should already be disambiguated from the load_data step.
         
         Args:
-            author_disambiguation: Apply fuzzy author name matching
             min_collaborations: Minimum collaborations to include edge
+            temporal: Whether to build temporal networks and compose them
+            degree_limits: Optional (min_degree, max_degree) tuple to filter nodes
         
         Returns:
             Self for method chaining
         """
-        import networkx as nx
-        from collections import defaultdict, Counter
-        from itertools import combinations
-        from .author_disambiguation import AuthorDisambiguator
-        
         if self.documents_df is None:
             raise ValueError("No documents loaded. Call load_data() first.")
         
-        self.logger.info("Setting up co-author network")
+        self.logger.info("Setting up co-author network using graph driver functions")
         
-        # Apply author disambiguation if requested
-        if author_disambiguation:
-            disambiguator = AuthorDisambiguator()
-            self.documents_df = disambiguator.disambiguate_authors(self.documents_df)
-            self.logger.info("Applied author disambiguation")
-        
-        # Build co-author collaboration counts
-        collaboration_counts = Counter()
-        author_document_map = defaultdict(list)
-        
-        for idx, row in self.documents_df.iterrows():
-            authors = row.get('authors', [])
-            if isinstance(authors, str):
-                authors = [authors]
+        if temporal and MainDataSchema.DATE.colname in self.documents_df.columns:
+            # Set up save directories and dataset name
+            dataset_name = getattr(self.data_loader, '_dataset_name', 'unknown')
+            networks_dir = self.data_loader.dataset_dirs["networks"]
             
-            # Convert to author IDs if needed
-            author_ids = []
-            for author in authors:
-                if isinstance(author, dict):
-                    author_id = author.get('id', author.get('name', str(author)))
-                else:
-                    author_id = str(author)
-                author_ids.append(author_id)
-                author_document_map[author_id].append(idx)
-            
-            # Count co-author pairs
-            for author1, author2 in combinations(author_ids, 2):
-                pair = tuple(sorted([author1, author2]))
-                collaboration_counts[pair] += 1
-        
-        # Build undirected co-author graph
-        self.coauthor_network = nx.Graph()
-        
-        # Add all authors as nodes with metadata
-        for _, author_row in self.authors_df.iterrows():
-            author_id = author_row['author_id']
-            self.coauthor_network.add_node(
-                author_id,
-                name=author_row['name'],
-                publication_count=author_row['publication_count'],
-                documents=author_document_map.get(author_id, [])
+            # Build temporal networks and compose them
+            self.logger.info("Building temporal co-author networks")
+            year_networks = build_temporal_coauthor_networks_from_dataframe(
+                self.documents_df,
+                author_names_col=MainDataSchema.AUTHOR_NAMES.colname,
+                author_ids_col=MainDataSchema.AUTHOR_IDS.colname,
+                date_col=MainDataSchema.DATE.colname,
+                min_collaborations=min_collaborations,
+                save_dir=networks_dir,
+                dataset_name=dataset_name
             )
+            
+            # Create composed network filename
+            if year_networks:
+                years = sorted(year_networks.keys())
+                composed_filename = f"composed_{dataset_name}_{years[0]}-{years[-1]}.graphml"
+                composed_path = os.path.join(networks_dir, composed_filename)
+            else:
+                composed_path = None
+            
+            # Compose yearly networks into single network
+            self.coauthor_network = compose_networks_from_dict(
+                year_networks, 
+                degree_limits, 
+                save_path=composed_path
+            )
+            
+            self.logger.info(f"Composed networks from {len(year_networks)} time periods")
+            
+        else:
+            # Build single co-author network
+            self.coauthor_network = build_coauthor_network_from_dataframe(
+                self.documents_df,
+                author_names_col=MainDataSchema.AUTHOR_NAMES.colname,
+                author_ids_col=MainDataSchema.AUTHOR_IDS.colname,
+                min_collaborations=min_collaborations
+            )
+            
+            # Apply degree limits if specified
+            if degree_limits:
+                if not isinstance(degree_limits, tuple) or len(degree_limits) != 2:
+                    raise ValueError("degree_limits should be a 2-tuple of (min, max) degrees")
+                
+                nodes_to_remove = [
+                    node for node, degree in dict(self.coauthor_network.degree()).items() 
+                    if degree < degree_limits[0] or degree > degree_limits[1]
+                ]
+                self.coauthor_network.remove_nodes_from(nodes_to_remove)
+                self.logger.info(f"Removed {len(nodes_to_remove)} nodes due to degree limits {degree_limits}")
+            
+            # Save single network
+            dataset_name = getattr(self.data_loader, '_dataset_name', 'unknown')
+            networks_dir = self.data_loader.dataset_dirs["clean"].replace("/clean", "/networks")
+            os.makedirs(networks_dir, exist_ok=True)
+            
+            network_filename = f"{dataset_name}_coauthor_network.graphml"
+            network_path = os.path.join(networks_dir, network_filename)
+            nx.write_graphml(self.coauthor_network, network_path)
+            self.logger.info(f"Saved co-author network to {network_path}")
         
-        # Add edges for collaborations meeting minimum threshold
-        edges_added = 0
-        for (author1, author2), count in collaboration_counts.items():
-            if count >= min_collaborations:
-                self.coauthor_network.add_edge(
-                    author1, author2,
-                    weight=count,
-                    collaborations=count
-                )
-                edges_added += 1
+        # Add author metadata to nodes if authors_df is available
+        if self.authors_df is not None:
+            for _, author_row in self.authors_df.iterrows():
+                author_id = str(author_row['author_id'])
+                if author_id in self.coauthor_network.nodes:
+                    self.coauthor_network.nodes[author_id].update({
+                        'name': author_row['name'],
+                        'publication_count': author_row['publication_count']
+                    })
         
         self.logger.info(
             f"Created co-author network with {self.coauthor_network.number_of_nodes()} nodes "
@@ -904,209 +917,107 @@ class MstmlOrchestrator:
     # ========================================================================================
     
     def preprocess_text(self,
-                       remove_stopwords: bool = True,
-                       apply_stemming: bool = True,
-                       min_term_freq: int = 2,
-                       max_term_freq: float = 0.8,
-                       custom_filters: Optional[list] = None) -> 'MstmlOrchestrator':
+                       standardize_authors: bool = False,
+                       allowed_categories: Optional[List[str]] = None,
+                       low_thresh: int = 1,
+                       high_frac: float = 0.995,
+                       extra_stopwords: Optional[List[str]] = None,
+                       train_lda: bool = True,
+                       num_topics: int = 50,
+                       lda_passes: int = 1,
+                       lambda_param: float = 0.6,
+                       top_n_terms: int = 2000) -> 'MstmlOrchestrator':
         """
-        Apply text preprocessing and vocabulary filtering.
+        Apply comprehensive text preprocessing and vocabulary filtering using TextPreprocessor.
         
         Args:
-            remove_stopwords: Remove common stop words
-            apply_stemming: Apply stemming/lemmatization
-            min_term_freq: Minimum term frequency threshold
-            max_term_freq: Maximum term frequency threshold (fraction)
-            custom_filters: Additional custom preprocessing filters
+            standardize_authors: Whether to standardize author names
+            allowed_categories: List of allowed categories for filtering
+            low_thresh: Minimum document frequency threshold
+            high_frac: Maximum document frequency fraction
+            extra_stopwords: Additional stopwords to remove
+            train_lda: Whether to train LDA model for relevancy filtering
+            num_topics: Number of topics for LDA model
+            lda_passes: Number of passes for LDA training
+            lambda_param: Lambda parameter for relevancy scoring
+            top_n_terms: Number of top relevant terms to keep
         
         Returns:
             Self for method chaining
         """
-        from gensim.utils import simple_preprocess
-        from gensim.corpora import Dictionary
-        from collections import Counter
-        import gensim.corpora as corpora
-        from ._file_driver import remove_stopwords as remove_stopwords_func, lemmatize_mp
-        import multiprocessing as mp
-        
         if self.documents_df is None:
             raise ValueError("No documents loaded. Call load_data() first.")
         
-        self.logger.info("Preprocessing text and filtering vocabulary")
+        self.logger.info("Starting comprehensive text preprocessing pipeline")
         
-        # Combine title and abstract for preprocessing
-        texts = []
-        for _, row in self.documents_df.iterrows():
-            title = str(row.get('title', ''))
-            abstract = str(row.get('abstract', ''))
-            combined_text = title + ' ' + abstract
-            texts.append(combined_text)
+        # Initialize TextPreprocessor
+        self.text_preprocessor = TextPreprocessor()
         
-        # Apply simple preprocessing (tokenization, lowercasing, punctuation removal)
-        tokenized_texts = [simple_preprocess(text, deacc=True) for text in texts]
-        self.logger.info(f"Tokenized {len(tokenized_texts)} documents")
-        
-        # Remove stopwords if requested
-        if remove_stopwords:
-            tokenized_texts = remove_stopwords_func(tokenized_texts)
-            self.logger.info("Removed stopwords")
-        
-        # Apply stemming/lemmatization if requested
-        if apply_stemming:
-            # Use multiprocessing for lemmatization
-            with mp.Pool() as pool:
-                tokenized_texts = pool.map(lemmatize_mp, tokenized_texts)
-            self.logger.info("Applied lemmatization")
-        
-        # Apply custom filters if provided
-        if custom_filters:
-            for filter_func in custom_filters:
-                tokenized_texts = [filter_func(doc) for doc in tokenized_texts]
-            self.logger.info(f"Applied {len(custom_filters)} custom filters")
-        
-        # Create vocabulary dictionary
-        self.vocabulary = Dictionary(tokenized_texts)
-        vocab_size_before = len(self.vocabulary)
-        
-        # Filter vocabulary by frequency thresholds
-        # Convert max_term_freq from fraction to absolute count
-        max_term_count = int(max_term_freq * len(tokenized_texts)) if max_term_freq < 1.0 else max_term_freq
-        
-        self.vocabulary.filter_extremes(
-            no_below=min_term_freq,
-            no_above=max_term_count,
-            keep_n=None  # Keep all remaining tokens
+        # Apply the complete preprocessing pipeline
+        processed_docs = self.text_preprocessor.update_dataframe(
+            self.documents_df,
+            text_column=MainDataSchema.RAW_TEXT.colname,
+            standardize_authors=standardize_authors,
+            allowed_categories=allowed_categories,
+            low_thresh=low_thresh,
+            high_frac=high_frac,
+            extra_stopwords=extra_stopwords,
+            train_lda=train_lda,
+            num_topics=num_topics,
+            lda_passes=lda_passes,
+            lambda_param=lambda_param,
+            top_n_terms=top_n_terms
         )
         
-        vocab_size_after = len(self.vocabulary)
+        # Store results in orchestrator
+        self.preprocessed_corpus = processed_docs.tolist()
+        self.vocabulary = self.text_preprocessor.get_dictionary()
+        self.bow_corpus = self.text_preprocessor.get_corpus()
+        
+        # Get preprocessing statistics
+        stats = self.text_preprocessor.get_stats_log()
+        
         self.logger.info(
-            f"Filtered vocabulary: {vocab_size_before} -> {vocab_size_after} terms "
-            f"(min_freq={min_term_freq}, max_freq={max_term_count})"
+            f"Text preprocessing complete. "
+            f"Initial vocab: {stats.get('vocab_initial', 'N/A')}, "
+            f"After filtering: {stats.get('vocab_filtered', 'N/A')}, "
+            f"Final vocab: {stats.get('vocab_final', len(self.vocabulary))}"
         )
         
-        # Create final preprocessed corpus as bag-of-words
-        self.preprocessed_corpus = [self.vocabulary.doc2bow(doc) for doc in tokenized_texts]
-        
-        # Store raw tokenized texts for future use
-        self.tokenized_texts = tokenized_texts
-        
-        total_tokens = sum(len(doc) for doc in tokenized_texts)
-        self.logger.info(f"Preprocessing complete: {total_tokens} total tokens, {len(self.vocabulary)} unique terms")
+        # Save preprocessed results to files
+        self._save_preprocessing_results()
         
         return self
     
-    def apply_term_relevancy_filtering(self,
-                                     lambda_param: float = 0.4,
-                                     top_terms_per_topic: int = 50) -> 'MstmlOrchestrator':
-        """
-        Apply global LDA-based term relevancy filtering.
-        
-        Uses global LDA model to compute term relevancy scores:
-        r(w,k|λ) = λ*log P(w|k) + (1-λ)*log[P(w|k)/P(w)]
-        
-        Args:
-            lambda_param: Relevancy weighting parameter (0-1)
-            top_terms_per_topic: Number of top relevant terms to retain
-        
-        Returns:
-            Self for method chaining
-        """
-        import gensim
-        from gensim.models import LdaModel
-        import numpy as np
-        from ._math_driver import mstml_term_relevance_stable
-        from ._topic_model_driver import TermRelevanceTopicFilter
-        
-        if self.preprocessed_corpus is None:
-            raise ValueError("No preprocessed corpus available. Call preprocess_text() first.")
-        
-        self.logger.info(f"Applying term relevancy filtering with λ={lambda_param}")
-        
-        # Train global LDA model on full corpus for term relevancy computation
-        num_topics_global = min(50, max(10, len(self.preprocessed_corpus) // 100))  # Heuristic topic count
-        
-        self.global_lda_model = LdaModel(
-            corpus=self.preprocessed_corpus,
-            id2word=self.vocabulary,
-            num_topics=num_topics_global,
-            random_state=42,
-            passes=10,
-            alpha='auto',
-            eta='auto'
-        )
-        
-        self.logger.info(f"Trained global LDA model with {num_topics_global} topics")
-        
-        # Get topic-word distributions (phi matrix)
-        topic_word_matrix = self.global_lda_model.get_topics()  # Shape: (num_topics, vocab_size)
-        
-        # Compute term relevancy scores for all topic-word pairs
-        relevant_terms = set()
-        
-        # Use the TermRelevanceTopicFilter class for filtering
-        filter_obj = TermRelevanceTopicFilter(
-            lambda_param=lambda_param,
-            top_n_terms=top_terms_per_topic
-        )
-        
-        for topic_idx in range(num_topics_global):
-            # Get relevancy scores for this topic
-            relevancy_scores = mstml_term_relevance_stable(
-                topic_word_matrix, topic_idx, lambda_param
-            )
+    def _save_preprocessing_results(self):
+        """Save preprocessing results to data/clean/ directory."""
+        if not hasattr(self, 'data_loader') or not self.data_loader:
+            self.logger.warning("No data loader available - cannot save preprocessing results")
+            return
             
-            # Get top relevant term indices
-            top_term_indices = np.argsort(relevancy_scores)[-top_terms_per_topic:]
-            
-            # Add term IDs to relevant terms set
-            for term_idx in top_term_indices:
-                relevant_terms.add(term_idx)
+        clean_dir = self.data_loader.dataset_dirs["clean"]
         
-        self.logger.info(f"Selected {len(relevant_terms)} relevant terms from {len(self.vocabulary)} total terms")
+        # Save vocabulary dictionary
+        dict_path = os.path.join(clean_dir, 'id2word.pkl')
+        write_pickle(self.vocabulary, dict_path)
+        self.logger.info(f"Saved vocabulary dictionary with {len(self.vocabulary)} terms to id2word.pkl")
         
-        # Create new vocabulary with only relevant terms
-        relevant_token_ids = list(relevant_terms)
-        old_vocabulary = self.vocabulary
+        # Save preprocessed corpus
+        corpus_path = os.path.join(clean_dir, 'preprocessed_corpus.pkl')
+        write_pickle(self.preprocessed_corpus, corpus_path)
+        self.logger.info("Saved preprocessed corpus to preprocessed_corpus.pkl")
         
-        # Create mapping of old term IDs to new term IDs
-        old_to_new_id = {old_id: new_id for new_id, old_id in enumerate(relevant_token_ids)}
+        # Save BOW corpus
+        bow_path = os.path.join(clean_dir, 'bow_corpus.pkl')
+        write_pickle(self.bow_corpus, bow_path)
+        self.logger.info("Saved bag-of-words corpus to bow_corpus.pkl")
         
-        # Build new vocabulary dictionary
-        new_vocab_dict = {}
-        for new_id, old_id in enumerate(relevant_token_ids):
-            new_vocab_dict[new_id] = old_vocabulary[old_id]
-        
-        # Create new Dictionary object
-        from gensim.corpora import Dictionary
-        self.vocabulary = Dictionary()
-        self.vocabulary.token2id = {token: idx for idx, token in new_vocab_dict.items()}
-        self.vocabulary.id2token = new_vocab_dict
-        
-        # Update preprocessed corpus with new vocabulary
-        new_corpus = []
-        for doc_bow in self.preprocessed_corpus:
-            new_doc = []
-            for term_id, count in doc_bow:
-                if term_id in old_to_new_id:
-                    new_term_id = old_to_new_id[term_id]
-                    new_doc.append((new_term_id, count))
-            new_corpus.append(new_doc)
-        
-        self.preprocessed_corpus = new_corpus
-        
-        # Update tokenized texts to match new vocabulary
-        if hasattr(self, 'tokenized_texts'):
-            relevant_tokens = set(self.vocabulary.token2id.keys())
-            self.tokenized_texts = [
-                [token for token in doc if token in relevant_tokens]
-                for doc in self.tokenized_texts
-            ]
-        
-        self.logger.info(
-            f"Term relevancy filtering complete: vocabulary reduced to {len(self.vocabulary)} terms"
-        )
-        
-        return self
+        # Save preprocessing statistics
+        stats_path = os.path.join(clean_dir, 'preprocessing_stats.json')
+        with open(stats_path, 'w') as f:
+            json.dump(self.text_preprocessor.get_stats_log(), f, indent=2)
+        self.logger.info("Saved preprocessing statistics to preprocessing_stats.json")
+    
     
     # ========================================================================================
     # 3. TEMPORAL ENSEMBLE TOPIC MODELING
@@ -1127,9 +1038,6 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        import pandas as pd
-        from datetime import datetime
-        import numpy as np
         
         if self.documents_df is None:
             raise ValueError("No documents loaded. Call load_data() first.")
@@ -1152,7 +1060,6 @@ class MstmlOrchestrator:
             max_date = df['date'].max()
             
             # Parse duration (e.g., '3M' -> 3 months)
-            import re
             duration_match = re.match(r'(\d+)([YMWD])', chunk_duration.upper())
             if not duration_match:
                 raise ValueError(f"Invalid chunk_duration format: {chunk_duration}. Use format like '3M', '6M', '1Y'")
@@ -1252,8 +1159,6 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        import numpy as np
-        from collections import defaultdict
         
         if not self.time_chunks:
             raise ValueError("No temporal chunks created. Call create_temporal_chunks() first.")
@@ -1344,9 +1249,6 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        import numpy as np
-        from gensim.models import LdaModel
-        from gensim.corpora import Dictionary
         
         if not self.time_chunks:
             raise ValueError("No temporal chunks created. Call create_temporal_chunks() first.")
@@ -1472,10 +1374,6 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        import numpy as np
-        import networkx as nx
-        from scipy.spatial.distance import pdist, squareform
-        from ._math_driver import hellinger
         
         if self.topic_vectors is None:
             raise ValueError("No topic vectors available. Call train_ensemble_models() first.")
@@ -1487,7 +1385,6 @@ class MstmlOrchestrator:
         # Use FAISS for large datasets if requested and available
         if use_faiss and n_topics >= self.config['kNN_params']['faiss_acceleration']['min_vectors_for_faiss']:
             try:
-                import faiss
                 
                 self.logger.info(f"Using FAISS for {n_topics} topic vectors")
                 
@@ -1591,10 +1488,6 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        from scipy.cluster.hierarchy import linkage, dendrogram
-        from scipy.spatial.distance import pdist
-        import numpy as np
-        from ._math_driver import hellinger
         
         if self.topic_vectors is None:
             raise ValueError("No topic vectors available. Call train_ensemble_models() first.")
@@ -1668,9 +1561,6 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        import numpy as np
-        from ._topic_model_driver import setup_author_probs_matrix
-        from .fast_encode_tree import fast_encode_tree_structure
         
         if self.topic_dendrogram is None:
             raise ValueError("No topic dendrogram available. Call construct_topic_dendrogram() first.")
@@ -1805,9 +1695,6 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        import numpy as np
-        from collections import defaultdict
-        from ._math_driver import diffuse_distribution
         
         if not self.chunk_topic_models:
             raise ValueError("No topic models available. Call train_ensemble_models() first.")
@@ -1941,9 +1828,6 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        import numpy as np
-        from scipy.stats import entropy
-        from collections import OrderedDict
         
         if self.author_topic_distributions is None:
             raise ValueError("No author embeddings available. Call compute_author_embeddings() first.")
@@ -2056,9 +1940,6 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        import numpy as np
-        from scipy.stats import entropy
-        from collections import OrderedDict
         
         if self.author_topic_distributions is None:
             raise ValueError("No author embeddings available. Call compute_author_embeddings() first.")
@@ -2157,22 +2038,17 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
-        import numpy as np
-        from scipy.spatial.distance import pdist, squareform
-        from ._math_driver import hellinger
         
         if self.topic_vectors is None:
             raise ValueError("No topic vectors available. Call build_topic_manifold() first.")
         
         self.logger.info(f"Creating {n_components}D PHATE embedding with {color_by} coloring")
         
-        # Try to import PHATE, fall back to PCA if not available
-        try:
-            import phate
+        # Check if PHATE is available, fall back to PCA if not
+        if PHATE_AVAILABLE:
             use_phate = True
-        except ImportError:
+        else:
             self.logger.warning("PHATE not available, falling back to PCA")
-            from sklearn.decomposition import PCA
             use_phate = False
         
         # Convert topic vectors to numpy array
@@ -2256,8 +2132,6 @@ class MstmlOrchestrator:
         """
         if self.topic_embedding is None:
             raise ValueError("Topic embedding not created. Call create_topic_embedding() first.")
-        
-        import matplotlib.pyplot as plt
         
         params = self.embed_params
         method_name = params.get('method', 'Embedding')

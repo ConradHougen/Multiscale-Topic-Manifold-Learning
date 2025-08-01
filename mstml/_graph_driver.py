@@ -24,6 +24,162 @@ from ._file_driver import get_data_int_dir
 # Network Construction and I/O
 # ============================================================================
 
+def build_coauthor_network_from_dataframe(df, author_names_col, author_ids_col=None, min_collaborations=1):
+    """
+    Build co-author network directly from a dataframe in memory.
+    Modern version of gen_nx_multigraphs_per_year for orchestrator use.
+    
+    Args:
+        df: DataFrame with document data
+        author_names_col: Column name containing author names
+        author_ids_col: Column name containing author IDs (optional)
+        min_collaborations: Minimum collaborations to include edge
+    
+    Returns:
+        NetworkX Graph with co-author network
+    """
+    import networkx as nx
+    from collections import defaultdict
+    
+    # Initialize network
+    G = nx.Graph()
+    collaboration_counts = defaultdict(int)
+    author_document_map = defaultdict(list)
+    
+    # Process each document
+    for idx, row in df.iterrows():
+        # Get author data - prefer IDs if available, fallback to names
+        if author_ids_col and author_ids_col in df.columns:
+            authors = row.get(author_ids_col, [])
+        else:
+            authors = row.get(author_names_col, [])
+        
+        # Ensure we have a list
+        if isinstance(authors, str):
+            authors = [authors]
+        authors = [str(a) for a in authors if a]
+        
+        # Track author-document relationships
+        for author in authors:
+            author_document_map[author].append(idx)
+        
+        # Add authors as nodes
+        G.add_nodes_from(authors)
+        
+        # Create collaboration pairs (following original pattern)
+        if len(authors) > 1:
+            auth_pairs = [(a, b) for idx_a, a in enumerate(authors) 
+                         for b in authors[idx_a + 1:]]
+            
+            # Count collaborations
+            for author1, author2 in auth_pairs:
+                pair = tuple(sorted([author1, author2]))
+                collaboration_counts[pair] += 1
+    
+    # Add edges for collaborations meeting threshold
+    for (author1, author2), count in collaboration_counts.items():
+        if count >= min_collaborations:
+            G.add_edge(author1, author2, weight=count, collaborations=count)
+    
+    # Remove self-loops if any exist (following original pattern)
+    G.remove_edges_from(nx.selfloop_edges(G))
+    
+    return G
+
+
+def build_temporal_coauthor_networks_from_dataframe(df, author_names_col, author_ids_col=None, 
+                                                   date_col='date', min_collaborations=1,
+                                                   save_dir=None, dataset_name=None):
+    """
+    Build co-author networks for each time period from a dataframe.
+    Modern version that works with in-memory data with optional file saving.
+    
+    Args:
+        df: DataFrame with document data
+        author_names_col: Column name containing author names  
+        author_ids_col: Column name containing author IDs (optional)
+        date_col: Column name containing dates
+        min_collaborations: Minimum collaborations to include edge
+        save_dir: Optional directory to save individual year networks
+        dataset_name: Dataset name for file naming (required if save_dir provided)
+    
+    Returns:
+        Dict of {year: NetworkX Graph} for each year
+    """
+    # Ensure date column is datetime
+    if date_col in df.columns:
+        df[date_col] = pd.to_datetime(df[date_col])
+        
+        # Get year range
+        years = df[date_col].dt.year.unique()
+        year_networks = {}
+        
+        # Create save directory if specified
+        if save_dir and dataset_name:
+            os.makedirs(save_dir, exist_ok=True)
+        
+        # Build network for each year
+        for year in sorted(years):
+            year_df = df[df[date_col].dt.year == year]
+            if not year_df.empty:
+                year_networks[year] = build_coauthor_network_from_dataframe(
+                    year_df, author_names_col, author_ids_col, min_collaborations
+                )
+                
+                # Save individual year network if requested
+                if save_dir and dataset_name:
+                    filename = f"{dataset_name}_{year}.graphml"
+                    filepath = os.path.join(save_dir, filename)
+                    nx.write_graphml(year_networks[year], filepath)
+        
+        return year_networks
+    else:
+        # No date column - build single network
+        return {'all': build_coauthor_network_from_dataframe(
+            df, author_names_col, author_ids_col, min_collaborations
+        )}
+
+
+def compose_networks_from_dict(year_networks, d_lims=None, save_path=None):
+    """
+    Compose multiple yearly networks into a single network.
+    Modern version of compose_coauthorship_network for in-memory networks.
+    
+    Args:
+        year_networks: Dict of {year: NetworkX Graph}
+        d_lims: Optional tuple of (min_degree, max_degree) to filter nodes
+        save_path: Optional path to save composed network as GraphML
+    
+    Returns:
+        Composed NetworkX Graph
+    """
+    import networkx as nx
+    
+    # Start with empty graph
+    composed_graph = nx.Graph()
+    
+    # Compose all yearly networks
+    for year, graph in year_networks.items():
+        composed_graph = nx.compose(composed_graph, graph)
+    
+    # Apply degree limits if specified
+    if d_lims:
+        if not isinstance(d_lims, tuple) or len(d_lims) != 2:
+            raise ValueError("d_lims should be a 2-tuple of (min, max) degrees permitted")
+        
+        nodes_to_remove = [
+            node for node, degree in dict(composed_graph.degree()).items() 
+            if degree < d_lims[0] or degree > d_lims[1]
+        ]
+        composed_graph.remove_nodes_from(nodes_to_remove)
+    
+    # Save composed network if path provided
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        nx.write_graphml(composed_graph, save_path)
+    
+    return composed_graph
+
 def get_coauthors(G, authorid):
     """Function to retrieve all coauthors of a given author (by author ID) and coauthorship network"""
     return [n for n in G.neighbors((str(authorid)))]
@@ -386,7 +542,7 @@ def topic_space_dist_vs_path_len_for_non_overlapping_max_paths(nxg, auth_vecs, d
 
 def topic_space_dist_vs_path_length(nxg, auth_vecs, auth_ids, log_file, dmetric, nsamples=10000):
     """Function to get degrees of separation (path length) in co-author network vs. topic distance"""
-    from ._file_driver import atoms_print  # Import here to avoid circular imports
+    from ._file_driver import log_print  # Import here to avoid circular imports
     
     topic_distances = np.zeros(nsamples)
     path_len = np.zeros(nsamples)
@@ -399,7 +555,7 @@ def topic_space_dist_vs_path_length(nxg, auth_vecs, auth_ids, log_file, dmetric,
     attempts = 0
     while nsp < nsamples:
         if attempts >= max_attempts:
-            atoms_print("Early exit: Attempts at limit:{}".format(attempts), log_file)
+            log_print("Early exit: Attempts at limit:{}".format(attempts), level="warning")
             break
 
         # Start by randomly sampling a source node
