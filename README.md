@@ -13,43 +13,137 @@ MSTML provides a scalable method for predicting collaborative behaviors using te
 
 ## Installation
 
-### Quick Installation
+MSTML uses a custom build system that automatically handles dependencies, compilation, and installation:
 
-#### Windows
+```bash
+# Clone the repository
+git clone https://github.com/your-repo/Multi-Scale-Topic-Manifold-Learning.git
+cd Multi-Scale-Topic-Manifold-Learning
 
-#### Linux/macOS
+# Run the automated build and installation
+python build.py
+```
 
+The `build.py` script will:
+- Create and configure a conda environment
+- Install all required dependencies
+- Compile Cython extensions for optimal performance
+- Install the MSTML package in development mode
 
 ### Build Requirements
 - **Python 3.7+**
 - **C Compiler** (GCC, Clang, or MSVC)
-- **NumPy and Cython** (for compiling performance extensions)
+- **Conda or Miniconda** (recommended for dependency management)
 
 ### Performance Note
 MSTML includes Cython extensions for optimal performance. The `fast_encode_tree` module provides 5-50x speedup for hierarchical operations. If compilation fails, the framework will fall back to pure Python implementations with a performance warning.
 
 ## Quick Start
 
+### Basic Usage
+
+```python
+from mstml.core import MstmlOrchestrator
+
+# Create orchestrator for your dataset
+orchestrator = MstmlOrchestrator("arxiv")
+
+# Configure data filters for AI/ML papers from 2020-2023
+orchestrator.configure_data_filters(
+    date_range={'start': '2020-01-01', 'end': '2023-12-31'},
+    categories=['cs.AI', 'cs.LG', 'stat.ML', 'cs.CL']
+)
+
+# Run complete analysis pipeline
+orchestrator.load_data()
+orchestrator.preprocess_text()
+orchestrator.setup_coauthor_network()
+orchestrator.create_temporal_chunks(months_per_chunk=6)
+orchestrator.train_ensemble_models()
+orchestrator.build_topic_manifold()
+orchestrator.compute_author_embeddings()
+
+# Save results
+results_path = orchestrator.finalize_experiment()
+print(f"Analysis complete! Results saved to: {results_path}")
+```
+
+### Advanced Configuration
+
+```python
+from mstml.core import MstmlOrchestrator
+from mstml.text_preprocessing import TextPreprocessor
+from mstml.author_disambiguation import AuthorDisambiguator
+
+# Configure components with custom hyperparameters
+text_preprocessor = TextPreprocessor(
+    custom_stopwords=['arxiv', 'paper', 'abstract']
+)
+
+author_disambiguator = AuthorDisambiguator(
+    similarity_threshold=0.85,  # More aggressive name merging
+    max_authors_per_doc=15     # Skip documents with too many authors
+)
+
+# Create orchestrator with pre-configured components
+orchestrator = MstmlOrchestrator(
+    dataset_name="arxiv",
+    experiment_name="ai_trends_analysis",
+    text_preprocessor=text_preprocessor,
+    author_disambiguator=author_disambiguator
+)
+
+# Advanced text preprocessing options
+orchestrator.preprocess_text(
+    low_thresh=3,              # Remove rare terms (< 3 documents)
+    high_frac=0.98,            # Remove common terms (> 98% documents)
+    num_topics=80,             # LDA topics for relevancy filtering
+    top_n_terms=2500           # Final vocabulary size
+)
+```
+
 
 ## Repository Structure
 
 ```
 Multi-Scale-Topic-Manifold-Learning/
-├── source/                 # Core MSTML modules
-│   ├── __init__.py        # Main package imports
-│   ├── core.py            # Core MSTML classes and functionality
-│   ├── gdltm.py           # Geometry-Driven Longitudinal Topic Model
-│   ├── hrg.py             # Hierarchical Random Graph implementation
-│   ├── utils.py           # Utility functions and helpers
-│   └── text_processing.py # Text processing and cleaning
-├── notebooks/             # Example notebooks and tutorials
-│   └── 01_basic_usage_example.ipynb
-├── data/                  # Data directory structure
-│   └── arxiv/            # Example dataset organization
-├── build.py              # Conda environment setup, build, and package installation
-├── setup.py              # Package installation script
-├── requirements.txt      # Python dependencies
-└── README.md            # This file
+├── mstml/                      # Core MSTML package
+│   ├── __init__.py            # Main package imports
+│   ├── core.py                # MstmlOrchestrator and core functionality
+│   ├── data_loaders.py        # Data loading and preprocessing pipeline
+│   ├── dataframe_schema.py    # Data extraction and field definitions
+│   ├── author_disambiguation.py # Author name disambiguation and linking
+│   ├── text_preprocessing.py   # Text processing and vocabulary filtering
+│   ├── data_loader_registry.py # Extensible file format support
+│   ├── model_evaluation.py    # Model evaluation and metrics
+│   ├── fast_encode_tree/      # High-performance Cython extensions
+│   │   ├── __init__.py       # Fast tree encoding for HRG
+│   │   ├── fast_encode_tree.pyx # Cython implementation
+│   │   └── fast_encode_tree_py.py # Python fallback
+│   ├── _embedding_driver.py   # Embedding methods (PHATE, UMAP, etc.)
+│   ├── _graph_driver.py       # Network analysis and graph operations
+│   ├── _math_driver.py        # Mathematical utilities and distance metrics
+│   ├── _topic_model_driver.py # Topic modeling utilities (LDA, etc.)
+│   └── _file_driver.py        # File I/O and utility functions
+├── notebooks/                 # Example notebooks and tutorials
+│   ├── 01_gdltm_geometric_longitudinal_topic_model.ipynb
+│   ├── 02_mstml_multimodal_topic_drift.ipynb
+│   ├── 03_mstml_vocabulary_filtering_and_tuning.ipynb
+│   └── 04_mstml_network_link_prediction.ipynb
+├── data/                      # Data directory (created automatically)
+│   ├── experiments/          # Experiment results and outputs
+│   └── [dataset_name]/       # Dataset-specific directories
+│       ├── original/         # Raw input data files
+│       ├── clean/           # Processed dataframes and metadata
+│       └── networks/        # Network data and analysis results
+├── tests/                     # Unit tests and test utilities
+├── papers/                    # Research papers and documentation
+├── build.py                   # Automated build and installation script
+├── setup.py                   # Package installation configuration
+├── pyproject.toml            # Modern Python project configuration
+├── requirements.txt          # Python dependencies
+├── conda_requirements.txt    # Conda-specific dependencies
+└── README.md                 # This file
 ```
 
 ## Key Features
@@ -82,7 +176,10 @@ Multi-Scale-Topic-Manifold-Learning/
 
 See the `notebooks/` directory for comprehensive examples:
 
-- `01_basic_usage_example.ipynb`: Introduction to core functionality
+- `01_gdltm_geometric_longitudinal_topic_model.ipynb`: GDLTM topic evolution analysis
+- `02_mstml_multimodal_topic_drift.ipynb`: Multi-scale topic drift detection
+- `03_mstml_vocabulary_filtering_and_tuning.ipynb`: Text preprocessing and vocabulary optimization
+- `04_mstml_network_link_prediction.ipynb`: Co-author network analysis and link prediction
 
 ## Data Format
 

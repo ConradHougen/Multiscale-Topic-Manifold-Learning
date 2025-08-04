@@ -145,7 +145,6 @@ Comprehensive text processing pipeline system.
 
 **Methods:**
 - `__init__()` - Initialize with stopwords configuration
-- `standardize_authors()` - Format author name strings
 - `filter_by_categories()` - Filter by document categories
 - `preprocess_raw_text()` - Basic text tokenization step
 - `lemmatize_all()` - Parallel document lemmatization process

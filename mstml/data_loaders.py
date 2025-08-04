@@ -7,6 +7,10 @@ import os
 import json  # For metadata
 import datetime as dt
 import pandas.api.types as ptypes  # Allows O(1) check for datetime-like type
+import pickle
+import shutil
+import requests
+from collections import defaultdict
 
 from typing import Optional, Dict, Union, List
 from pathlib import Path
@@ -90,10 +94,63 @@ class DataLoader(ABC):
         self.data_filters = data_filters or {}
 
         # To be resolved later
+        self.raw_data = []
         self.dataset_dirs = None
         self.input_paths = None  # Now a list of resolved paths
         self.df = None  # Full dataframe
         self._valid_mask = None  # Boolean Series marking valid rows without NA
+
+    @classmethod 
+    def with_config(cls, config: Dict[str, any]) -> 'DataLoader':
+        """
+        Create a DataLoader instance with configuration that will be applied when 
+        the loader is used with an MstmlOrchestrator.
+        
+        This is a factory method for advanced users who want to pre-configure
+        their DataLoader before passing it to MstmlOrchestrator.
+        
+        Args:
+            config: Configuration dictionary containing:
+                - data_filters: Dict of filter configurations
+                - overwrite: Whether to overwrite existing data
+                - author_disambiguation: Whether to apply author disambiguation  
+                - input_schema_map: Custom schema mappings
+                
+        Returns:
+            Configured DataLoader instance (will be a subclass like JsonDataLoader)
+            
+        Example:
+            # Create pre-configured JsonDataLoader
+            loader = JsonDataLoader.with_config({
+                'data_filters': {
+                    'date_range': {'start': '2020-01-01', 'end': '2023-12-31'},
+                    'categories': ['cs.AI', 'cs.LG', 'stat.ML']
+                },
+                'overwrite': True
+            })
+            
+            # Use with orchestrator
+            orchestrator = MstmlOrchestrator(dataset_name="arxiv", data_loader=loader)
+        """
+        # Store configuration for later use - we can't fully initialize without
+        # input_path and dataset_name which come from the orchestrator
+        instance = cls.__new__(cls)
+        instance._stored_config = config
+        return instance
+    
+    def _apply_stored_config(self, input_path: Union[str, List[str]], dataset_name: str):
+        """Apply stored configuration when the DataLoader is actually initialized."""
+        if hasattr(self, '_stored_config'):
+            config = self._stored_config
+            self.__init__(
+                input_path=input_path,
+                dataset_name=dataset_name,
+                overwrite=config.get('overwrite', False),
+                author_disambiguator=AuthorDisambiguator() if config.get('author_disambiguation', True) else None,
+                input_schema_map=config.get('input_schema_map', None),
+                data_filters=config.get('data_filters', None)
+            )
+            delattr(self, '_stored_config')
 
     def get_clean_df(self):
         """Get dataframe with only rows that have complete data (no NA)"""
@@ -112,7 +169,7 @@ class DataLoader(ABC):
         self._prepare_environment()
         self._prepare_input()
         self._load_raw_data()
-        self._preprocess()  # Basic preprocessing only
+        self._convert_to_schema()  # Convert raw data to structured DataFrame
         self._apply_data_filters()  # Filter data by categories, dates, etc.
         self._apply_author_disambiguation()  # Author disambiguation on reduced df for speed
         self._validate_and_flag()
@@ -176,16 +233,48 @@ class DataLoader(ABC):
         pass
 
     @abstractmethod
-    def _preprocess(self):
+    def _convert_to_schema(self):
         """
-        Convert raw text corpus data into a DataFrame with standardized column
-        format.
-
-        Preprocessing capabilities are implemented in text_preprocessing.py
+        Convert raw data entries (e.g., JSON objects) into a structured DataFrame
+        according to MainDataSchema field definitions.
+        
+        This method extracts fields like title, date, raw_text, author_names from
+        the raw data entries and creates a pandas DataFrame with standardized columns.
+        
+        Note: This is NOT text preprocessing - text preprocessing (tokenization, 
+        cleaning, etc.) is implemented in text_preprocessing.py
 
         Should set self.df
         """
         pass
+    
+    def _apply_field_mapping(self, entry: dict) -> dict:
+        """
+        Apply input_schema_map to convert data-specific field names to schema field names.
+        
+        This allows users to map their data format (e.g., ArXiv) to the standard schema.
+        For example: {'abstract': 'raw_text', 'update_date': 'date'}
+        
+        Args:
+            entry: Raw data entry (e.g., JSON object)
+            
+        Returns:
+            Entry with field names mapped to schema expectations
+        """
+        if not self.input_schema_map:
+            return entry
+        
+        mapped_entry = entry.copy()
+        
+        # Apply mappings
+        for source_field, target_field in self.input_schema_map.items():
+            if source_field in entry:
+                mapped_entry[target_field] = entry[source_field]
+                # Optionally remove the original field to avoid confusion
+                if source_field != target_field:
+                    mapped_entry.pop(source_field, None)
+        
+        return mapped_entry
 
     def _prepare_environment(self):
         """
@@ -233,7 +322,6 @@ class DataLoader(ABC):
             filename = input_path.name
             target_path = original_dir / filename
             if not target_path.exists():
-                import requests
                 log_print(f"Downloading from URL: {input_path}")
                 response = requests.get(input_str)
                 response.raise_for_status()
@@ -247,7 +335,6 @@ class DataLoader(ABC):
             target_path = original_dir / resolved_input_path.name
             if not target_path.exists():
                 log_print(f"Copying {resolved_input_path} → {target_path}")
-                import shutil
                 shutil.copy(resolved_input_path, target_path)
             return target_path
 
@@ -276,11 +363,22 @@ class DataLoader(ABC):
         # Get all column names and types from the schema
         schema_fields = MainDataSchema.all_fields()
 
-        required_cols = [field.colname for field in schema_fields]
+        # Only validate fields that should be populated at raw data stage
+        # Skip author_ids and preprocessed_text as they're populated later
+        required_cols = [
+            field.colname for field in schema_fields 
+            if field.colname not in ['author_ids', 'preprocessed_text']
+        ]
         col_type_map = {field.colname: field.value.type for field in schema_fields}
 
-        # Step 1: Initial mask: rows with no NA in required fields
+        # Step 1: Initial mask: rows with no NA in required fields (excluding later-populated fields)
         non_null_mask = self.df[required_cols].notna().all(axis=1)
+        
+        # Debug: Show validation results
+        log_print(f"Validation check - Non-null mask: {non_null_mask.sum()}/{len(non_null_mask)} rows pass", level="info")
+        for col in required_cols:
+            non_null_count = self.df[col].notna().sum()
+            log_print(f"  Column '{col}': {non_null_count}/{len(self.df)} non-null, dtype: {self.df[col].dtype}", level="debug")
 
         # General-purpose type checking function
         def check_type(col: pd.Series, expected_type: type) -> pd.Series:
@@ -298,18 +396,24 @@ class DataLoader(ABC):
 
         type_mask = non_null_mask.copy()
         for col, expected_type in col_type_map.items():
-            try:
-                result = check_type(self.df[col], expected_type)
-                if isinstance(result, bool):
-                    # Some checks return a scalar (e.g., is_datetime64_any_dtype); broadcast it
-                    result = pd.Series([result] * len(self.df), index=self.df.index)
-                type_mask &= result
-            except Exception as e:
-                log_print(f"Type check for column '{col}' failed: {e}", level="warning")
-                type_mask &= False  # Fail closed
+            if col not in ['author_ids', 'preprocessed_text']:  # Skip later-populated fields
+                try:
+                    result = check_type(self.df[col], expected_type)
+                    if isinstance(result, bool):
+                        # Some checks return a scalar (e.g., is_datetime64_any_dtype); broadcast it
+                        result = pd.Series([result] * len(self.df), index=self.df.index)
+                    
+                    type_check_count = result.sum() if hasattr(result, 'sum') else (result if isinstance(result, bool) else 0)
+                    log_print(f"  Type check '{col}' ({expected_type.__name__}): {type_check_count}/{len(self.df)} pass", level="debug")
+                    
+                    type_mask &= result
+                except Exception as e:
+                    log_print(f"Type check for column '{col}' failed: {e}", level="warning")
+                    type_mask &= False  # Fail closed
 
         # Final mask
         self._valid_mask = type_mask
+        log_print(f"Final validation: {self._valid_mask.sum()}/{len(self._valid_mask)} rows valid", level="info")
 
         # Logging results
         n_total = len(self.df)
@@ -503,8 +607,6 @@ class DataLoader(ABC):
 
     def _save_outputs(self):
         """Save the cleaned DataFrame, metadata, and any additional variables."""
-        import pickle
-        from collections import defaultdict
         
         df_path = os.path.join(self.dataset_dirs["clean"], 'main_df.pkl')
         write_pickle(df_path, self.df)
@@ -527,8 +629,6 @@ class DataLoader(ABC):
 
     def _save_author_mappings(self):
         """Generate and save author mapping dictionaries."""
-        from collections import defaultdict
-        from .dataframe_schema import MainDataSchema
         
         # Create author mappings
         authorId_to_df_row = defaultdict(list)
@@ -628,8 +728,7 @@ class JsonDataLoader(DataLoader):
         If multiple files are provided, concatenates all entries.
         Sets self.raw_data to a list of parsed entries.
         """
-        self.raw_data = []
-        total_entries = 0
+        total_entries = len(self.raw_data)
         
         for input_path in self.input_paths:
             with open(input_path, 'r', encoding='utf-8') as f:
@@ -641,20 +740,54 @@ class JsonDataLoader(DataLoader):
         
         log_print(f"Total loaded: {total_entries} entries from {len(self.input_paths)} file(s)", level="info")
 
-    def _preprocess(self):
+    def _convert_to_schema(self):
         """
         Converts each raw entry into a row conforming to MainDataSchema using extractors.
         Then applies basic preprocessing (expensive operations like author disambiguation done after filtering).
         """
         rows = []
-        for entry in self.raw_data:
+        
+        # Debug: Check first entry to see what fields are available
+        if len(self.raw_data) > 0:
+            sample_entry = self.raw_data[0]
+            log_print(f"Sample entry keys: {list(sample_entry.keys())}", level="info")
+            log_print(f"Sample entry: {dict(list(sample_entry.items())[:3])}", level="info")  # First 3 items
+            
+            # Check if we need field mapping and suggest it
+            expected_fields = ['title', 'date', 'raw_text', 'authors']
+            missing_fields = [field for field in expected_fields if field not in sample_entry]
+            
+            if missing_fields and not self.input_schema_map:
+                available_fields = list(sample_entry.keys())
+                log_print(f"Warning: Expected schema fields {missing_fields} not found in data.", level="warning")
+                log_print(f"Available fields: {available_fields}", level="info")
+                log_print("Consider providing input_schema_map to map your data fields to schema fields.", level="info")
+                
+                # Suggest common mappings for ArXiv data
+                if 'abstract' in available_fields and 'raw_text' in missing_fields:
+                    log_print("Suggestion: For ArXiv data, try input_schema_map={'abstract': 'raw_text', 'update_date': 'date', 'authors_parsed': 'authors'}", level="info")
+            elif self.input_schema_map:
+                log_print(f"Using field mapping: {self.input_schema_map}", level="info")
+        
+        for i, entry in enumerate(self.raw_data):
             try:
+                # Apply field mapping if provided
+                mapped_entry = self._apply_field_mapping(entry)
+                
                 row = {
-                    field.colname: field.get_extractor()(entry)
+                    field.colname: field.get_extractor()(mapped_entry)
                     for field in MainDataSchema
                 }
                 rows.append(row)
+                
+                # Debug: Check first few rows to see what's being extracted
+                if i < 3:
+                    log_print(f"Row {i} extracted: title='{row.get('title', 'N/A')[:50]}...', date={row.get('date')}, raw_text_len={len(str(row.get('raw_text', '')))}", level="info")
+                    
             except Exception as e:
-                log_print(f"Skipping malformed entry due to error: {e}", level="warning")
+                log_print(f"Skipping malformed entry {i} due to error: {e}", level="warning")
+                if i < 5:  # Show detailed error for first few entries
+                    log_print(f"Entry {i} keys: {list(entry.keys())}", level="debug")
 
+        log_print(f"Length of rows after converting to schema: {len(rows)}", level="info")
         self.df = pd.DataFrame(rows)

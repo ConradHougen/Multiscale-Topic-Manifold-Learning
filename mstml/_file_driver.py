@@ -837,8 +837,8 @@ def log_print(message: str, level: str = "info", logger: logging.Logger = None, 
     log_func = getattr(logger, level.lower(), logger.info)
     log_func(message)
 
-    # if also_print:
-    #     print(message)
+    if also_print:
+        print(message)
 
 
 def create_hash_id(text, length=8):

@@ -48,13 +48,7 @@ class TextPreprocessor:
         self.reduced_vocabulary = None
         self.stats_log = {}
 
-    ### === STEP 1: Author and Category Filtering === ###
-    def standardize_authors(self, df):
-        df['authors'] = df['authors'].map(
-            lambda authlist: [str.upper(str.strip(f"{a[0]}, {a[1]}")) for a in authlist]
-        )
-        return df
-
+    ### === STEP 1: Category Filtering === ###
     def filter_by_categories(self, df, allowed_categories: List[str]):
         return df[df['categories'].apply(lambda x: any(cat in x for cat in allowed_categories))]
 
@@ -97,17 +91,48 @@ class TextPreprocessor:
 
         approved_tokens = {t for t in all_tokens if t not in cut_tokens and len(t) > 2}
 
+        # Debug: Check filtering results
+        print(f"Debug: Initial vocabulary size: {len(all_tokens)}")
+        print(f"Debug: Tokens to cut: {len(cut_tokens)}")
+        print(f"Debug: Approved tokens: {len(approved_tokens)}")
+        
+        if len(approved_tokens) == 0:
+            print("Warning: No approved tokens after filtering! This will result in empty vocabulary.")
+            print(f"Sample cut tokens: {list(cut_tokens)[:20]}")
+            print(f"Sample all tokens: {list(all_tokens)[:20]}")
+
         # Apply in parallel
         args = [(doc, approved_tokens) for doc in docs]
         with Pool() as pool:
             self.filtered_docs = pool.starmap(filter_doc_with_approved_tokens, args)
+
+        # Debug: Check filtered docs
+        non_empty_filtered = [doc for doc in self.filtered_docs if doc]
+        print(f"Debug: Documents after filtering - Total: {len(self.filtered_docs)}, Non-empty: {len(non_empty_filtered)}")
 
         self.id2word = corpora.Dictionary(self.filtered_docs)
         self.stats_log['vocab_filtered'] = len(self.id2word)
 
     ### === STEP 4: Global LDA and Term Relevancy Filtering === ###
     def train_lda_model(self, num_topics=50, passes=1):
-        self.corpus = [self.id2word.doc2bow(doc) for doc in self.filtered_docs]
+        # Debug information
+        if not self.filtered_docs:
+            raise ValueError("No filtered documents available. Make sure apply_frequency_stopword_filter was called first.")
+        
+        non_empty_docs = [doc for doc in self.filtered_docs if doc]
+        if not non_empty_docs:
+            raise ValueError("All documents are empty after filtering. Consider reducing filtering strictness.")
+        
+        vocab_size = len(self.id2word) if self.id2word else 0
+        if vocab_size == 0:
+            raise ValueError("Vocabulary is empty. Check frequency filtering parameters.")
+        
+        print(f"Training LDA with {len(non_empty_docs)} non-empty documents, vocabulary size: {vocab_size}")
+        
+        self.corpus = [self.id2word.doc2bow(doc) for doc in self.filtered_docs if doc]  # Skip empty docs
+        if not self.corpus:
+            raise ValueError("Corpus is empty after converting to bag-of-words. All documents may be empty.")
+            
         self.lda_model = LdaModel(corpus=self.corpus, num_topics=num_topics, id2word=self.id2word, passes=passes)
 
     def compute_relevancy_scores(self, lambda_param=0.6, top_n=2000):
@@ -179,7 +204,6 @@ class TextPreprocessor:
     
     ### === PIPELINE WRAPPER METHOD === ###
     def update_dataframe(self, df, text_column, 
-                        standardize_authors=False, 
                         allowed_categories=None,
                         low_thresh=1, 
                         high_frac=0.995, 
@@ -196,7 +220,6 @@ class TextPreprocessor:
         Args:
             df: DataFrame containing text data
             text_column: Name of column containing raw text
-            standardize_authors: Whether to standardize author names
             allowed_categories: List of allowed categories for filtering
             low_thresh: Minimum document frequency threshold
             high_frac: Maximum document frequency fraction
@@ -215,11 +238,7 @@ class TextPreprocessor:
         
         log_print("Starting text preprocessing pipeline", level="info")
         
-        ### === STEP 1: Author and Category Filtering === ###
-        if standardize_authors and 'authors' in df.columns:
-            df = self.standardize_authors(df)
-            log_print("Applied author name standardization", level="info")
-            
+        ### === STEP 1: Category Filtering === ###
         if allowed_categories and 'categories' in df.columns:
             df = self.filter_by_categories(df, allowed_categories)
             log_print(f"Filtered to {len(allowed_categories)} allowed categories", level="info")
@@ -248,6 +267,8 @@ class TextPreprocessor:
             high_frac=high_frac, 
             extra_stopwords=extra_stopwords
         )
+
+        log_print(f"Vocab length: {len(self.id2word)}", level="info")
         
         ### === STEP 4: Global LDA and Term Relevancy Filtering === ###
         if train_lda:

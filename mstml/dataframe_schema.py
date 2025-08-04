@@ -36,15 +36,18 @@ class MainDataSchema(Enum):
     AUTHOR_NAMES = FieldDef(
         "author_names",
         lambda entry: (
-            # Handle None authors
             [] if entry.get("authors") is None else
-            # Handle list of dictionaries with "name" key
-            [a["name"] for a in entry.get("authors", []) 
-             if isinstance(a, dict) and "name" in a] if 
-            any(isinstance(a, dict) for a in entry.get("authors", [])) else
-            # Handle list of strings directly
-            [str(a) for a in entry.get("authors", []) 
-             if isinstance(a, str) and a.strip()]
+            # Handle list of [first, last] pairs (ArXiv authors_parsed format)
+            [str.upper(str.strip(f"{auth[1]}, {auth[0]}")) for auth in entry.get("authors", [])
+             if isinstance(auth, (list, tuple)) and len(auth) >= 2] if
+            isinstance(entry.get("authors"), list) and len(entry.get("authors", [])) > 0 and isinstance(entry.get("authors")[0], (list, tuple)) else
+            # Handle comma-separated string format
+            [str.upper(str.strip(author)) for author in str(entry.get("authors", "")).split(",")
+             if author and str.strip(author)] if isinstance(entry.get("authors"), str) else
+            # Handle already processed list of strings
+            [str.upper(str.strip(str(auth))) for auth in entry.get("authors", [])
+             if auth and str(auth).strip()] if isinstance(entry.get("authors"), list) else
+            []
         ),
         list
     )

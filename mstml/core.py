@@ -704,17 +704,51 @@ class MstmlOrchestrator:
                  dataset_name: str,
                  experiment_name: str = "mstml",
                  experiment_directory: Optional[str] = None,
+                 data_loader: Optional[DataLoader] = None,
+                 text_preprocessor: Optional['TextPreprocessor'] = None,
+                 author_disambiguator: Optional[AuthorDisambiguator] = None,
                  config: Optional[dict] = None,
                  logger: Optional[logging.Logger] = None):
         """
-        Initialize MSTML Orchestrator with data directory and configuration.
+        Initialize MSTML Orchestrator with data directory and optional components.
         
         Args:
             dataset_name: Name of dataset to load, e.g. "arxiv"
+            experiment_name: Prefix that describes the current experiment type (default: "mstml")
             experiment_directory: Path to experiment directory for results, auto-generated if None
-            experiment_name: Prefix that describes the current experiment type
+            data_loader: Pre-configured DataLoader instance, created with defaults if None
+            text_preprocessor: Pre-configured TextPreprocessor instance, created with defaults if None  
+            author_disambiguator: Pre-configured AuthorDisambiguator instance, created with defaults if None
             config: Configuration dictionary for model parameters
             logger: Custom logger, creates default if None
+            
+        Example:
+            # Basic usage with defaults
+            orchestrator = MstmlOrchestrator("my_dataset")
+            
+            # Custom experiment directory
+            orchestrator = MstmlOrchestrator(
+                dataset_name="arxiv",
+                experiment_name="topic_analysis",
+                experiment_directory="/path/to/analysis"
+            )
+            
+            # Pre-configured components for advanced users
+            from mstml.data_loaders import JsonDataLoader
+            from mstml.author_disambiguation import AuthorDisambiguator
+            
+            # Configure DataLoader with date filtering
+            data_loader = JsonDataLoader.with_config({
+                'data_filters': {
+                    'date_range': {'start': '2020-01-01', 'end': '2023-12-31'},
+                    'categories': ['cs.AI', 'cs.LG']
+                }
+            })
+            
+            orchestrator = MstmlOrchestrator(
+                dataset_name="arxiv", 
+                data_loader=data_loader
+            )
         """
         # Core configuration
         self.dataset_name = dataset_name
@@ -730,7 +764,9 @@ class MstmlOrchestrator:
             exp_dir_name = f"{experiment_name}_{timestamp}"
             # Convert to Path object if it's a string
             data_path = Path(self.dataset_directory) if isinstance(self.dataset_directory, str) else self.dataset_directory
-            self.experiment_directory = str(data_path.parent / "experiments" / exp_dir_name)
+            # Place experiments at project root level (same level as data/)
+            project_root = data_path.parent.parent  # data_path is data/dataset_name, so go up two levels
+            self.experiment_directory = str(project_root / "experiments" / exp_dir_name)
         else:
             self.experiment_directory = experiment_directory
         
@@ -738,9 +774,14 @@ class MstmlOrchestrator:
         os.makedirs(self.experiment_directory, exist_ok=True)
         self.logger.info(f"Experiment directory: {self.experiment_directory}")
         
+        # Component configuration - accept user-provided components or create defaults
+        self._data_loader = data_loader
+        self._text_preprocessor = text_preprocessor  
+        self._author_disambiguator = author_disambiguator
+        self._pending_data_filters = None  # Store filters until DataLoader is created
+        
         # Data management
-        self.schema = None
-        self.data_loader = None
+        self.schema = None  
         self.documents_df = None
         self.authors_df = None
         self.coauthor_network = None
@@ -749,7 +790,6 @@ class MstmlOrchestrator:
         self.vocabulary = None
         self.global_lda_model = None  # For term relevancy filtering
         self.preprocessed_corpus = None
-        self.text_preprocessor = None
         
         # Temporal ensemble components
         self.time_chunks = []
@@ -787,6 +827,195 @@ class MstmlOrchestrator:
         self.embed_figure = None
         
         self.logger.info("MstmlOrchestrator initialized")
+
+    # ============================================================================
+    # Data Getter/Setter Methods
+    # ============================================================================
+    def get_df(self) -> pd.DataFrame:
+        """Get the current dataframe managed by orchestrator"""
+        return self.documents_df
+
+    def set_df(self, df: pd.DataFrame) -> None:
+        """Set the current dataframe managed by orchestrator"""
+        self.documents_df = df.copy()
+
+    # ============================================================================
+    # Component Management - Getter/Setter Methods
+    # ============================================================================
+    
+    def get_data_loader(self) -> Optional[DataLoader]:
+        """Get the current DataLoader instance."""
+        return self._data_loader
+    
+    def set_data_loader(self, data_loader: DataLoader) -> 'MstmlOrchestrator':
+        """
+        Set a custom DataLoader instance.
+        
+        Args:
+            data_loader: Configured DataLoader instance
+            
+        Returns:
+            Self for method chaining
+            
+        Example:
+            from mstml.data_loaders import JsonDataLoader
+            
+            # Create and configure DataLoader
+            loader = JsonDataLoader.with_config({
+                'data_filters': {
+                    'date_range': {'start': '2020-01-01', 'end': '2023-12-31'},
+                    'categories': ['cs.AI', 'cs.LG', 'stat.ML']
+                }
+            })
+            
+            orchestrator.set_data_loader(loader)
+        """
+        self._data_loader = data_loader
+        self.logger.info("DataLoader updated")
+        return self
+    
+    def get_text_preprocessor(self) -> Optional['TextPreprocessor']:
+        """Get the current TextPreprocessor instance.""" 
+        return self._text_preprocessor
+    
+    def set_text_preprocessor(self, text_preprocessor: 'TextPreprocessor') -> 'MstmlOrchestrator':
+        """
+        Set a custom TextPreprocessor instance.
+        
+        Args:
+            text_preprocessor: Configured TextPreprocessor instance
+            
+        Returns:
+            Self for method chaining
+        """
+        self._text_preprocessor = text_preprocessor
+        self.logger.info("TextPreprocessor updated")
+        return self
+    
+    def get_author_disambiguator(self) -> Optional[AuthorDisambiguator]:
+        """Get the current AuthorDisambiguator instance."""
+        return self._author_disambiguator
+    
+    def set_author_disambiguator(self, author_disambiguator: AuthorDisambiguator) -> 'MstmlOrchestrator':
+        """
+        Set a custom AuthorDisambiguator instance.
+        
+        Args:
+            author_disambiguator: Configured AuthorDisambiguator instance
+            
+        Returns:
+            Self for method chaining
+        """
+        self._author_disambiguator = author_disambiguator
+        self.logger.info("AuthorDisambiguator updated")
+        return self
+    
+    def configure_data_filters(self, 
+                              date_range: Optional[Dict[str, str]] = None,
+                              categories: Optional[List[str]] = None,
+                              custom_filter: Optional[callable] = None,
+                              **kwargs) -> 'MstmlOrchestrator':
+        """
+        Configure data filters for the DataLoader. This is a convenient way to set
+        common filtering options without manually creating a DataLoader.
+        
+        Args:
+            date_range: Date range filter with 'start' and/or 'end' keys
+                       Accepts flexible date formats:
+                       - '2020-01-01' (ISO format)
+                       - '2020/01/01' (slash format)
+                       - '01-01-2020' (US format)
+                       - 'Jan 1, 2020' (text format)
+            categories: List of category labels to include (for arXiv-style data)
+                       Example: ['cs.AI', 'cs.LG', 'stat.ML']
+            custom_filter: Custom filter function that takes a DataFrame and returns a boolean mask
+            **kwargs: Additional filter configurations
+            
+        Returns:
+            Self for method chaining
+            
+        Example:
+            # Date range filtering
+            orchestrator.configure_data_filters(
+                date_range={'start': '2020-01-01', 'end': '2023-12-31'}
+            )
+            
+            # Category filtering
+            orchestrator.configure_data_filters(
+                categories=['cs.AI', 'cs.LG', 'stat.ML']
+            )
+            
+            # Combined filtering
+            orchestrator.configure_data_filters(
+                date_range={'start': '2020-01-01'},
+                categories=['cs.AI', 'cs.LG']
+            )
+            
+            # Custom filtering
+            def recent_papers(df):
+                return df['date'] >= pd.Timestamp('2022-01-01')
+                
+            orchestrator.configure_data_filters(
+                custom_filter=recent_papers
+            )
+        """
+        if self._data_loader is None:
+            # Create a default DataLoader with the filters
+            filters = {}
+            if date_range:
+                filters['date_range'] = self._normalize_date_range(date_range)
+            if categories:
+                filters['categories'] = categories
+            if custom_filter:
+                filters['custom'] = {'function': custom_filter}
+            filters.update(kwargs)
+            
+            # We'll need to create the DataLoader when load_data is called
+            # For now, store the filter configuration
+            self._pending_data_filters = filters
+        else:
+            # Update existing DataLoader's configuration
+            current_filters = self._data_loader.data_filters.copy()
+            if date_range:
+                current_filters['date_range'] = self._normalize_date_range(date_range)
+            if categories:
+                current_filters['categories'] = categories
+            if custom_filter:
+                current_filters['custom'] = {'function': custom_filter}
+            current_filters.update(kwargs)
+            
+            self._data_loader.data_filters = current_filters
+            
+        self.logger.info("Data filters configured")
+        return self
+    
+    def _normalize_date_range(self, date_range: Dict[str, str]) -> Dict[str, str]:
+        """
+        Normalize date range to ISO format with flexible input parsing.
+        
+        Args:
+            date_range: Dict with 'start' and/or 'end' keys
+            
+        Returns:
+            Dict with normalized ISO format dates
+        """
+        normalized = {}
+        for key, date_str in date_range.items():
+            if key not in ['start', 'end']:
+                continue
+                
+            try:
+                # Use pandas to parse flexible date formats
+                parsed_date = pd.to_datetime(date_str)
+                normalized[key] = parsed_date.strftime('%Y-%m-%d')
+            except Exception as e:
+                raise ValueError(
+                    f"Could not parse date '{date_str}' for {key}. "
+                    f"Supported formats: '2020-01-01', '2020/01/01', '01-01-2020', 'Jan 1, 2020'. "
+                    f"Error: {e}"
+                )
+        
+        return normalized
 
     def set_experiment_directory(self, experiment_directory: str, create_if_missing: bool = True):
         """
@@ -854,19 +1083,24 @@ class MstmlOrchestrator:
     
     def load_data(self,
                   original_data_fnames: Optional[Union[str, List[str]]] = None,
-                  author_disambiguation: bool = True,
-                  overwrite: bool = False,
+                  author_disambiguation: Optional[bool] = None,
+                  overwrite: Optional[bool] = None,
                   data_filters: Optional[Dict[str, any]] = None) -> 'MstmlOrchestrator':
         """
         Load and validate document corpus data using DataLoader pipeline.
+        
+        This method now works with the new component system - you can either:
+        1. Provide a pre-configured DataLoader via constructor or set_data_loader()
+        2. Use this method with parameters to create a DataLoader automatically
+        3. Use configure_data_filters() before calling this method
         
         Args:
             original_data_fnames: Filename(s) of source data in data/<dataset_name>/original
                                  Can be a single string, list of strings, or None for auto-discovery
                                  If None, all supported files in original/ directory will be loaded
-            author_disambiguation: Whether to apply author disambiguation
-            overwrite: Whether to overwrite existing processed data
-            data_filters: Optional dict of filters to apply before expensive operations
+            author_disambiguation: Whether to apply author disambiguation (overrides component setting)
+            overwrite: Whether to overwrite existing processed data (overrides component setting)
+            data_filters: Dict of filters to apply before expensive operations (merges with component filters)
                          Example: {
                              'date_range': {'start': '2020-01-01', 'end': '2023-12-31'},
                              'categories': ['cs.AI', 'cs.LG', 'stat.ML']
@@ -874,9 +1108,24 @@ class MstmlOrchestrator:
         
         Returns:
             Self for method chaining
+            
+        Example:
+            # Simple usage - configure filters first
+            orchestrator = MstmlOrchestrator("arxiv")
+            orchestrator.configure_data_filters(
+                date_range={'start': '2020-01-01', 'end': '2023-12-31'},
+                categories=['cs.AI', 'cs.LG']
+            )
+            orchestrator.load_data()
+            
+            # Override settings  
+            orchestrator.load_data(
+                author_disambiguation=False,
+                data_filters={'categories': ['cs.AI']}
+            )
         """
         # Skip loading if already loaded (unless overwrite)
-        if self.documents_df is not None and not overwrite:
+        if self.documents_df is not None and (overwrite is False or (overwrite is None and not getattr(self, '_default_overwrite', False))):
             self.logger.info("Data already loaded. Use overwrite=True to reload.")
             return self
             
@@ -894,48 +1143,98 @@ class MstmlOrchestrator:
             filenames = original_data_fnames
             self.logger.info(f"Loading {len(filenames)} specified file(s): {filenames}")
         
-        # Initialize author disambiguator if requested
-        disambiguator = AuthorDisambiguator() if author_disambiguation else None
-        
         # Validate that we have files to load
         if not filenames:
             raise ValueError("No files to load. Either specify filenames or ensure supported files exist in original/ directory.")
         
-        # Create data loader based on file extension(s) using registry
-        # Collect all file extensions
-        file_extensions = set()
-        for fname in filenames:
-            ext = fname.split('.')[-1].lower()
-            file_extensions.add(ext)
-        
-        # Check if all files are compatible using registry
-        if DataLoaderRegistry.are_extensions_compatible(file_extensions):
-            # Get the appropriate loader class from registry
-            loader_class = DataLoaderRegistry.get_loader_for_extensions(file_extensions)
-            self.data_loader = loader_class(
-                input_path=filenames,  # Pass list of filenames
-                dataset_name=self.dataset_name,
-                overwrite=overwrite,
-                author_disambiguator=disambiguator,
-                data_filters=data_filters
-            )
+        # Handle DataLoader creation or configuration
+        if self._data_loader is not None:
+            # Use existing DataLoader but may need to update configuration
+            self.logger.info("Using pre-configured DataLoader")
+            
+            # Check if it was created with with_config() and needs initialization
+            if hasattr(self._data_loader, '_stored_config'):
+                self._data_loader._apply_stored_config(filenames, self.dataset_name)
+            
+            # Apply parameter overrides if provided
+            if author_disambiguation is not None:
+                if author_disambiguation and self._data_loader.author_disambiguator is None:
+                    self._data_loader.author_disambiguator = self._author_disambiguator or AuthorDisambiguator()
+                elif not author_disambiguation:
+                    self._data_loader.author_disambiguator = None
+                    
+            if overwrite is not None:
+                self._data_loader._overwrite = overwrite
+                
+            # Merge data filters  
+            if data_filters or self._pending_data_filters:
+                current_filters = self._data_loader.data_filters.copy()
+                if self._pending_data_filters:
+                    current_filters.update(self._pending_data_filters)
+                if data_filters:
+                    current_filters.update(data_filters)
+                self._data_loader.data_filters = current_filters
+                
+            self.data_loader = self._data_loader
+            
         else:
-            # Get supported extensions for error message
-            supported_extensions = DataLoaderRegistry.get_supported_extensions()
-            if len(file_extensions) == 1:
-                # Single unsupported extension
-                ext = list(file_extensions)[0]
-                raise ValueError(
-                    f"Unsupported data format: .{ext}. "
-                    f"Supported formats: {sorted(supported_extensions)}"
+            # Create new DataLoader based on file extensions
+            # Collect all file extensions
+            file_extensions = set()
+            for fname in filenames:
+                ext = fname.split('.')[-1].lower()
+                file_extensions.add(ext)
+            
+            # Check if all files are compatible using registry
+            if DataLoaderRegistry.are_extensions_compatible(file_extensions):
+                # Get the appropriate loader class from registry
+                loader_class = DataLoaderRegistry.get_loader_for_extensions(file_extensions)
+                
+                # Determine settings
+                use_author_disambiguation = author_disambiguation if author_disambiguation is not None else True
+                use_overwrite = overwrite if overwrite is not None else False
+                
+                # Merge data filters
+                final_filters = {}
+                if self._pending_data_filters:
+                    final_filters.update(self._pending_data_filters)
+                if data_filters:
+                    final_filters.update(data_filters)
+                
+                # Create disambiguator
+                disambiguator = self._author_disambiguator or AuthorDisambiguator() if use_author_disambiguation else None
+                
+                self.data_loader = loader_class(
+                    input_path=filenames,
+                    dataset_name=self.dataset_name,
+                    overwrite=use_overwrite,
+                    author_disambiguator=disambiguator,
+                    data_filters=final_filters or None
                 )
+                
+                # Store reference for future use
+                self._data_loader = self.data_loader
+                
             else:
-                # Mixed incompatible formats
-                raise ValueError(
-                    f"Incompatible file formats detected: {sorted(file_extensions)}. "
-                    f"All files must be handled by the same loader. "
-                    f"Supported formats: {sorted(supported_extensions)}"
-                )
+                # Get supported extensions for error message
+                supported_extensions = DataLoaderRegistry.get_supported_extensions()
+                if len(file_extensions) == 1:
+                    # Single unsupported extension
+                    ext = list(file_extensions)[0]
+                    raise ValueError(
+                        f"Unsupported data format: .{ext}. "
+                        f"Supported formats: {sorted(supported_extensions)}"
+                    )
+                else:
+                    # Mixed incompatible formats
+                    raise ValueError(
+                        f"Incompatible file formats detected: {sorted(file_extensions)}. "
+                        f"All files must be handled by the same loader. "
+                        f"Supported formats: {sorted(supported_extensions)}"
+                    )
+        
+        # Clear pending filters since they've been applied
+        self._pending_data_filters = None
         
         # Run the complete data loading pipeline
         self.data_loader.run()
@@ -946,6 +1245,226 @@ class MstmlOrchestrator:
         
         return self
     
+    def load_raw_data(self,
+                      original_data_fnames: Optional[Union[str, List[str]]] = None,
+                      overwrite: Optional[bool] = None,
+                      input_schema_map: Optional[Dict[str, str]] = None) -> 'MstmlOrchestrator':
+        """
+        Load raw document data without applying any filters.
+        
+        This method loads the data into a DataFrame but skips all filtering steps,
+        making it easier to inspect the raw data and debug filtering issues.
+        
+        Args:
+            original_data_fnames: Filename(s) of source data in data/<dataset_name>/original
+            overwrite: Whether to overwrite existing processed data
+            input_schema_map: Dict mapping data field names to schema field names
+                             Example for ArXiv: {'abstract': 'raw_text', 'update_date': 'date'}
+        
+        Returns:
+            Self for method chaining
+            
+        Example:
+            # Load raw data first to inspect
+            orchestrator = MstmlOrchestrator("arxiv")
+            orchestrator.load_raw_data()
+            
+            # Check what's in the data
+            print(f"Total documents: {len(orchestrator.documents_df)}")
+            print(f"Date range: {orchestrator.documents_df['date'].min()} to {orchestrator.documents_df['date'].max()}")
+            
+            # For ArXiv data, use field mapping:
+            orchestrator.load_raw_data(
+                input_schema_map={'abstract': 'raw_text', 'update_date': 'date'}
+            )
+        """
+        # Skip loading if already loaded (unless overwrite)
+        if self.documents_df is not None and (overwrite is False or (overwrite is None and not getattr(self, '_default_overwrite', False))):
+            self.logger.info("Data already loaded. Use overwrite=True to reload.")
+            return self
+            
+        self.logger.info(f"Loading raw data from {self.dataset_directory}/original/ (no filters)")
+        
+        # Handle filename input or auto-discovery
+        if original_data_fnames is None:
+            filenames = self._discover_data_files()
+            self.logger.info(f"Auto-discovered {len(filenames)} file(s): {filenames}")
+        elif isinstance(original_data_fnames, str):
+            filenames = [original_data_fnames]
+            self.logger.info(f"Loading specified file: {filenames[0]}")
+        else:
+            filenames = original_data_fnames
+            self.logger.info(f"Loading {len(filenames)} specified file(s): {filenames}")
+        
+        if not filenames:
+            raise ValueError("No files to load. Either specify filenames or ensure supported files exist in original/ directory.")
+        
+        # Create DataLoader WITHOUT any filters
+        file_extensions = set()
+        for fname in filenames:
+            ext = fname.split('.')[-1].lower()
+            file_extensions.add(ext)
+        
+        # Get the appropriate loader class
+        if len(file_extensions) == 1:
+            ext = list(file_extensions)[0]
+            loader_class = DataLoaderRegistry.get_loader_class(ext)
+            
+            if loader_class is None:
+                supported_extensions = DataLoaderRegistry.get_supported_extensions()
+                raise ValueError(f"Unsupported file extension: '.{ext}'. Supported: {sorted(supported_extensions)}")
+        elif DataLoaderRegistry.are_extensions_compatible(file_extensions):
+            loader_class = DataLoaderRegistry.get_loader_for_extensions(file_extensions)
+        else:
+            supported_extensions = DataLoaderRegistry.get_supported_extensions()
+            raise ValueError(f"Incompatible file formats: {sorted(file_extensions)}. Supported: {sorted(supported_extensions)}")
+        
+        # Create loader with NO processing components
+        self.data_loader = loader_class(
+            input_path=filenames,
+            dataset_name=self.dataset_name,
+            overwrite=overwrite,
+            author_disambiguator=None,  # No author disambiguation!
+            data_filters=None,  # No filters!
+            input_schema_map=input_schema_map  # Field mapping for data format
+        )
+        
+        self._data_loader = self.data_loader
+        
+        # ONLY run the minimal data loading steps (not the full pipeline)
+        # Step 1: Load raw data from files
+        self.data_loader._prepare_environment()
+        self.data_loader._prepare_input()
+        self.data_loader._load_raw_data()  # This sets self.data_loader.raw_data internally
+        
+        # Step 2: Convert to DataFrame with schema (no filtering, no author processing)
+        self.data_loader._convert_to_schema()
+        
+        # Step 3: Basic validation and flagging only
+        self.data_loader._validate_and_flag()
+        
+        # Get the raw dataframes (before any processing)
+        self.documents_df = self.data_loader.get_clean_df()
+        self.logger.info(f"Loaded {len(self.documents_df)} raw documents (no filters, no author disambiguation)")
+        
+        return self
+    
+    def apply_data_filters(self,
+                          date_range: Optional[Dict[str, str]] = None,
+                          categories: Optional[List[str]] = None,
+                          custom_filter: Optional[callable] = None,
+                          **kwargs) -> 'MstmlOrchestrator':
+        """
+        Apply data filters to already loaded data.
+        
+        This method allows you to apply filters step by step and see the impact
+        of each filter on your dataset size.
+        
+        Args:
+            date_range: Dict with 'start' and/or 'end' keys (ISO date strings)
+            categories: List of category strings to keep
+            custom_filter: Custom filter function that takes a DataFrame and returns a filtered DataFrame
+            **kwargs: Additional filter parameters
+        
+        Returns:
+            Self for method chaining
+            
+        Example:
+            # Load raw data first
+            orchestrator.load_raw_data()
+            print(f"Raw data: {len(orchestrator.documents_df)} documents")
+            
+            # Apply date filter only
+            orchestrator.apply_data_filters(date_range={'start': '2020-01-01', 'end': '2023-12-31'})
+            print(f"After date filter: {len(orchestrator.documents_df)} documents")
+            
+            # Apply category filter
+            orchestrator.apply_data_filters(categories=['cs.AI', 'cs.LG'])
+            print(f"After category filter: {len(orchestrator.documents_df)} documents")
+        """
+        if self.documents_df is None:
+            raise ValueError("No data loaded. Call load_raw_data() first.")
+        
+        initial_count = len(self.documents_df)
+        self.logger.info(f"Applying filters to {initial_count} documents")
+        
+        # Build filter configuration
+        filters = {}
+        if date_range:
+            filters['date_range'] = self._normalize_date_range(date_range)
+        if categories:
+            filters['categories'] = categories
+        if custom_filter:
+            filters['custom'] = {'function': custom_filter}
+        filters.update(kwargs)
+        
+        # Apply each filter and report results
+        current_df = self.documents_df.copy()
+        
+        for filter_name, filter_config in filters.items():
+            pre_filter_count = len(current_df)
+            
+            if hasattr(self.data_loader, '_apply_single_filter'):
+                current_df = self.data_loader._apply_single_filter(filter_name, filter_config, current_df)
+            else:
+                self.logger.warning(f"Filter '{filter_name}' not supported by current DataLoader")
+                continue
+                
+            post_filter_count = len(current_df)
+            removed_count = pre_filter_count - post_filter_count
+            
+            self.logger.info(f"Filter '{filter_name}': {post_filter_count}/{pre_filter_count} documents retained ({removed_count} removed)")
+        
+        # Update the main dataframe
+        self.documents_df = current_df
+        final_count = len(self.documents_df)
+        total_removed = initial_count - final_count
+        
+        self.logger.info(f"Total filtering result: {final_count}/{initial_count} documents retained ({total_removed} removed)")
+        
+        return self
+    
+    def apply_author_disambiguation(self) -> 'MstmlOrchestrator':
+        """
+        Apply author disambiguation to already loaded and filtered data.
+        
+        This method should be called after load_raw_data() and apply_data_filters()
+        to perform author name disambiguation and ID assignment.
+        
+        Returns:
+            Self for method chaining
+            
+        Example:
+            # Load raw data, filter, then apply author disambiguation
+            orchestrator.load_raw_data()
+            orchestrator.apply_data_filters(date_range={'start': '2020-01-01', 'end': '2023-12-31'})
+            orchestrator.apply_author_disambiguation()
+        """
+        if self.documents_df is None:
+            raise ValueError("No data loaded. Call load_raw_data() first.")
+        
+        # Get or create author disambiguator
+        disambiguator = self._author_disambiguator
+        if disambiguator is None:
+            from .author_disambiguation import AuthorDisambiguator
+            disambiguator = AuthorDisambiguator()
+            self._author_disambiguator = disambiguator
+        
+        initial_count = len(self.documents_df)
+        self.logger.info(f"Applying author disambiguation to {initial_count} documents")
+        
+        # Apply author disambiguation to the current dataframe
+        processed_series = disambiguator.update_dataframe(self.documents_df)
+        
+        # Update the dataframe with author IDs
+        from .dataframe_schema import MainDataSchema
+        self.documents_df[MainDataSchema.AUTHOR_IDS.colname] = processed_series
+        
+        final_count = len(self.documents_df)
+        self.logger.info(f"Author disambiguation completed on {final_count} documents")
+        
+        return self
+
     def _discover_data_files(self) -> List[str]:
         """
         Auto-discover all supported data files in the original directory.
@@ -1086,7 +1605,6 @@ class MstmlOrchestrator:
     # ========================================================================================
     
     def preprocess_text(self,
-                       standardize_authors: bool = False,
                        allowed_categories: Optional[List[str]] = None,
                        low_thresh: int = 1,
                        high_frac: float = 0.995,
@@ -1100,7 +1618,6 @@ class MstmlOrchestrator:
         Apply comprehensive text preprocessing and vocabulary filtering using TextPreprocessor.
         
         Args:
-            standardize_authors: Whether to standardize author names
             allowed_categories: List of allowed categories for filtering
             low_thresh: Minimum document frequency threshold
             high_frac: Maximum document frequency fraction
@@ -1119,14 +1636,16 @@ class MstmlOrchestrator:
         
         self.logger.info("Starting comprehensive text preprocessing pipeline")
         
-        # Initialize TextPreprocessor
-        self.text_preprocessor = TextPreprocessor()
+        # Initialize TextPreprocessor if not already set
+        if self._text_preprocessor is None:
+            self.text_preprocessor = TextPreprocessor()
+        else:
+            self.text_preprocessor = self._text_preprocessor
         
         # Apply the complete preprocessing pipeline
         processed_docs = self.text_preprocessor.update_dataframe(
             self.documents_df,
             text_column=MainDataSchema.RAW_TEXT.colname,
-            standardize_authors=standardize_authors,
             allowed_categories=allowed_categories,
             low_thresh=low_thresh,
             high_frac=high_frac,
