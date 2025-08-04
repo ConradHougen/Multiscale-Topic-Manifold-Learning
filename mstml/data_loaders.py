@@ -8,13 +8,14 @@ import json  # For metadata
 import datetime as dt
 import pandas.api.types as ptypes  # Allows O(1) check for datetime-like type
 
-from typing import Optional, Dict
+from typing import Optional, Dict, Union, List
 from pathlib import Path
 from abc import ABC, abstractmethod
 
 from .author_disambiguation import AuthorDisambiguator
 from .dataframe_schema import MainDataSchema
 from ._file_driver import log_print, validate_dataset_name, write_pickle
+from .data_loader_registry import DataLoaderRegistry, register_data_loader
 
 
 def get_project_root_directory():
@@ -31,6 +32,12 @@ def get_data_directory():
     Returns the data folder at the same level as the mstml directory
     """
     return get_project_root_directory() / "data"
+
+def get_dataset_directory(dataset_name: str):
+    """
+    Returns the directory specific to the given dataset name
+    """
+    return get_data_directory() / dataset_name
 
 """============================================================================
 class DataLoader(ABC)
@@ -60,24 +67,31 @@ class DataLoader(ABC):
     7. A local directory with multiple files and formats
     """
     def __init__(self,
-                 input_path: str,
+                 input_path: Union[str, List[str]],
                  dataset_name: str,
                  overwrite: bool = False,
                  author_disambiguator: Optional[AuthorDisambiguator] = None,
-                 input_schema_map: Optional[Dict[str, str]] = None) -> None:
+                 input_schema_map: Optional[Dict[str, str]] = None,
+                 data_filters: Optional[Dict[str, any]] = None) -> None:
         # Ensure that dataset_name is coherent for a directory name
         validate_dataset_name(dataset_name)
 
+        # Normalize input to list of paths
+        if isinstance(input_path, str):
+            self._original_input_paths = [Path(input_path)]
+        else:
+            self._original_input_paths = [Path(p) for p in input_path]
+        
         # Copy input to internal variables
-        self._original_input_path = Path(input_path)
         self._dataset_name = dataset_name
         self._overwrite = overwrite
         self.author_disambiguator = author_disambiguator or AuthorDisambiguator()
         self.input_schema_map = input_schema_map or {}
+        self.data_filters = data_filters or {}
 
         # To be resolved later
         self.dataset_dirs = None
-        self.input_path = None
+        self.input_paths = None  # Now a list of resolved paths
         self.df = None  # Full dataframe
         self._valid_mask = None  # Boolean Series marking valid rows without NA
 
@@ -85,20 +99,22 @@ class DataLoader(ABC):
         """Get dataframe with only rows that have complete data (no NA)"""
         if self._valid_mask is None:
             raise RuntimeError("Validation not run yet.")
-        return self.df[self._valid_mask].sort_values(by=MainDataSchema.DATE)
+        return self.df[self._valid_mask].sort_values(by=MainDataSchema.DATE.colname)
 
     def get_na_df(self):
         """Get dataframe with only rows that are missing data (NA entries)"""
         if self._valid_mask is None:
             raise RuntimeError("Validation not run yet.")
-        return self.df[~self._valid_mask].sort_values(by=MainDataSchema.DATE)
+        return self.df[~self._valid_mask].sort_values(by=MainDataSchema.DATE.colname)
 
     def run(self):
-        """Main pipeline: prepare, load, preprocess, validate, save"""
+        """Main pipeline: prepare, load, preprocess, filter, validate, save"""
         self._prepare_environment()
         self._prepare_input()
         self._load_raw_data()
-        self._preprocess()
+        self._preprocess()  # Basic preprocessing only
+        self._apply_data_filters()  # Filter data by categories, dates, etc.
+        self._apply_author_disambiguation()  # Author disambiguation on reduced df for speed
         self._validate_and_flag()
         self._save_outputs()
 
@@ -179,49 +195,75 @@ class DataLoader(ABC):
 
     def _prepare_input(self):
         """
-        Resolves or downloads input_path into the original folder.
-        Updates self.input_path.
+        Resolves or downloads input_paths into the original folder.
+        Updates self.input_paths.
         """
-        self.input_path = self._resolve_input_path(self._original_input_path)
+        self.input_paths = [self._resolve_input_path(path) for path in self._original_input_paths]
 
     def _resolve_input_path(self, input_path: Path) -> Path:
         """
         Ensures the input file is located under original/, copying it there if needed.
-        If it's already in original/, do nothing.
-        If it's a URL, download it.
+        Handles multiple cases:
+        1. File already in original/ directory
+        2. Just a filename - look for it in original/ directory
+        3. Absolute path to existing file - copy to original/
+        4. URL - download to original/
         """
         original_dir = self.dataset_original_dir
-        input_path = input_path.expanduser().resolve()
+        
+        # Case 1: Check if it's just a filename and exists in original directory
+        if not input_path.is_absolute():
+            # It's a relative path or just a filename
+            target_path = original_dir / input_path.name
+            if target_path.exists():
+                log_print(f"Found file in dataset original directory: {target_path}")
+                return target_path
+        
+        # Expand and resolve the path for absolute path handling
+        resolved_input_path = input_path.expanduser().resolve()
 
-        # Case 1: input is already under original_dir
-        if original_dir in input_path.parents:
-            log_print(f"Input file already in correct location: {input_path}")
-            return input_path
+        # Case 2: input is already under original_dir
+        if original_dir in resolved_input_path.parents or resolved_input_path.parent == original_dir:
+            log_print(f"Input file already in correct location: {resolved_input_path}")
+            return resolved_input_path
 
-        # Case 2: input is a URL
-        if input_path.as_posix().startswith("http://") or input_path.as_posix().startswith("https://"):
+        # Case 3: input is a URL
+        input_str = str(input_path)
+        if input_str.startswith("http://") or input_str.startswith("https://"):
             filename = input_path.name
             target_path = original_dir / filename
             if not target_path.exists():
                 import requests
                 log_print(f"Downloading from URL: {input_path}")
-                response = requests.get(input_path.as_posix())
+                response = requests.get(input_str)
                 response.raise_for_status()
                 with open(target_path, "wb") as f:
                     f.write(response.content)
                 log_print(f"Downloaded to: {target_path}")
             return target_path
 
-        # Case 3: input is a local file outside the expected directory — copy it
-        if input_path.is_file():
-            target_path = original_dir / input_path.name
+        # Case 4: input is a local file outside the expected directory — copy it
+        if resolved_input_path.is_file():
+            target_path = original_dir / resolved_input_path.name
             if not target_path.exists():
-                log_print(f"Copying {input_path} → {target_path}")
+                log_print(f"Copying {resolved_input_path} → {target_path}")
                 import shutil
-                shutil.copy(input_path, target_path)
+                shutil.copy(resolved_input_path, target_path)
             return target_path
 
-        raise FileNotFoundError(f"Input path '{input_path}' not found or unsupported.")
+        # Case 5: File not found anywhere
+        # Provide helpful error message with suggestions
+        target_path = original_dir / input_path.name
+        available_files = [f.name for f in original_dir.iterdir() if f.is_file()] if original_dir.exists() else []
+        
+        error_msg = f"Input file '{input_path}' not found.\\n"
+        error_msg += f"Looked for: {target_path}\\n"
+        if available_files:
+            error_msg += f"Available files in {original_dir}: {available_files}"
+        else:
+            error_msg += f"No files found in {original_dir} (directory may not exist)"
+        
+        raise FileNotFoundError(error_msg)
 
     def _validate_and_flag(self):
         """
@@ -275,18 +317,202 @@ class DataLoader(ABC):
         n_invalid = n_total - n_valid
         log_print(f"Validation complete: {n_valid}/{n_total} rows valid, {n_invalid} invalid.", level="info")
 
+    def _apply_author_disambiguation(self):
+        """
+        Apply author disambiguation after data filtering to improve performance.
+        """
+        if self.author_disambiguator:
+            try:
+                author_ids_col = MainDataSchema.AUTHOR_IDS.colname
+                author_names_col = MainDataSchema.AUTHOR_NAMES.colname
+                
+                if author_names_col in self.df.columns:
+                    self.df[author_ids_col] = self.author_disambiguator.update_dataframe(
+                        self.df, author_names_col
+                    )
+                    log_print("Applied author disambiguation", level="info")
+                else:
+                    log_print(f"Column '{author_names_col}' not found - skipping author disambiguation", level="warning")
+            except Exception as e:
+                log_print(f"Author disambiguation failed: {e}", level="warning")
+        else:
+            log_print("No author disambiguator provided - using author names as IDs", level="info")
+    
+    def _apply_data_filters(self):
+        """
+        Apply data filters to reduce dataset size before expensive operations.
+        
+        Filters are applied in the order they appear in self.data_filters dict.
+        This step occurs after preprocessing but before author disambiguation
+        and validation to improve performance.
+        """
+        if not self.data_filters or self.df is None or self.df.empty:
+            return
+        
+        original_count = len(self.df)
+        log_print(f"Applying data filters to {original_count} rows...", level="info")
+        
+        for filter_name, filter_config in self.data_filters.items():
+            if filter_config is None:
+                continue
+                
+            try:
+                self.df = self._apply_single_filter(filter_name, filter_config, self.df)
+                current_count = len(self.df)
+                log_print(f"After {filter_name} filter: {current_count} rows ({original_count - current_count} removed)", level="info")
+                
+                if self.df.empty:
+                    log_print("Warning: All rows filtered out. Consider relaxing filter criteria.", level="warning")
+                    break
+                    
+            except Exception as e:
+                log_print(f"Error applying {filter_name} filter: {e}", level="error")
+                continue
+        
+        final_count = len(self.df)
+        if final_count < original_count:
+            reduction_pct = ((original_count - final_count) / original_count) * 100
+            log_print(f"Data filtering complete: {final_count}/{original_count} rows retained ({reduction_pct:.1f}% reduction)", level="info")
+    
+    def _apply_single_filter(self, filter_name: str, filter_config: any, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Apply a single filter to the dataframe.
+        
+        Args:
+            filter_name: Name of the filter for logging
+            filter_config: Filter configuration (format depends on filter type)
+            df: DataFrame to filter
+            
+        Returns:
+            Filtered DataFrame
+        """
+        if filter_name == 'date_range':
+            return self._apply_date_range_filter(filter_config, df)
+        elif filter_name == 'categories':
+            return self._apply_categories_filter(filter_config, df)
+        elif filter_name == 'custom':
+            return self._apply_custom_filter(filter_config, df)
+        else:
+            log_print(f"Unknown filter type: {filter_name}", level="warning")
+            return df
+    
+    def _apply_date_range_filter(self, date_config: Dict[str, str], df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Filter by date range.
+        
+        Args:
+            date_config: Dict with 'start' and/or 'end' keys (ISO date strings)
+            df: DataFrame to filter
+            
+        Returns:
+            Filtered DataFrame
+        """
+        date_col = MainDataSchema.DATE.colname
+        
+        if date_col not in df.columns:
+            log_print(f"Date column '{date_col}' not found, skipping date filter", level="warning")
+            return df
+        
+        # Convert to datetime if needed
+        if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
+            df[date_col] = pd.to_datetime(df[date_col])
+        
+        mask = pd.Series(True, index=df.index)
+        
+        if 'start' in date_config and date_config['start']:
+            start_date = pd.to_datetime(date_config['start'])
+            mask &= (df[date_col] >= start_date)
+            log_print(f"   Date filter: >= {start_date.date()}", level="debug")
+        
+        if 'end' in date_config and date_config['end']:
+            end_date = pd.to_datetime(date_config['end'])
+            mask &= (df[date_col] <= end_date)
+            log_print(f"   Date filter: <= {end_date.date()}", level="debug")
+        
+        return df[mask].copy()
+    
+    def _apply_categories_filter(self, categories_config: Union[List[str], Dict], df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Filter by categories (for arXiv-style data).
+        
+        Args:
+            categories_config: List of category labels to include, or dict with config
+            df: DataFrame to filter
+            
+        Returns:
+            Filtered DataFrame
+        """
+        # Handle different config formats
+        if isinstance(categories_config, list):
+            target_categories = categories_config
+            column = 'categories'  # Default column name
+        elif isinstance(categories_config, dict):
+            target_categories = categories_config.get('include', [])
+            column = categories_config.get('column', 'categories')
+        else:
+            log_print(f"Invalid categories filter config: {categories_config}", level="warning")
+            return df
+        
+        if not target_categories:
+            log_print("No target categories specified, skipping categories filter", level="warning")
+            return df
+        
+        if column not in df.columns:
+            log_print(f"Categories column '{column}' not found, skipping categories filter", level="warning")
+            return df
+        
+        log_print(f"   Categories filter: looking for {target_categories} in column '{column}'", level="debug")
+        
+        # Apply the category filter (similar to your original implementation)
+        def check_categories(cat_value):
+            if pd.isna(cat_value) or not cat_value:
+                return False
+            # Convert to string and check if any target category is in the value
+            cat_str = str(cat_value)
+            return any(cat in cat_str for cat in target_categories)
+        
+        cat_mask = df[column].apply(check_categories)
+        return df[cat_mask].copy()
+    
+    def _apply_custom_filter(self, custom_config: Dict, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Apply a custom filter using a lambda function or callable.
+        
+        Args:
+            custom_config: Dict with 'function' key containing a callable
+            df: DataFrame to filter
+            
+        Returns:
+            Filtered DataFrame
+        """
+        if not isinstance(custom_config, dict) or 'function' not in custom_config:
+            log_print("Custom filter requires a 'function' key with a callable", level="warning")
+            return df
+        
+        filter_func = custom_config['function']
+        if not callable(filter_func):
+            log_print("Custom filter 'function' must be callable", level="warning")
+            return df
+        
+        try:
+            mask = filter_func(df)
+            return df[mask].copy()
+        except Exception as e:
+            log_print(f"Custom filter function failed: {e}", level="error")
+            return df
+
     def _save_outputs(self):
         """Save the cleaned DataFrame, metadata, and any additional variables."""
         import pickle
         from collections import defaultdict
         
         df_path = os.path.join(self.dataset_dirs["clean"], 'main_df.pkl')
-        write_pickle(self.df, df_path)
+        write_pickle(df_path, self.df)
         log_print(f"Saved full dataframe to: {df_path}", level="info")
 
         # Save clean and NA views for inspection
-        write_pickle(self.get_clean_df(), os.path.join(self.dataset_dirs["clean"], 'clean_df.pkl'))
-        write_pickle(self.get_na_df(), os.path.join(self.dataset_dirs["clean"], 'na_df.pkl'))
+        write_pickle(os.path.join(self.dataset_dirs["clean"], 'clean_df.pkl'), self.get_clean_df())
+        write_pickle(os.path.join(self.dataset_dirs["clean"], 'na_df.pkl'), self.get_na_df())
 
         # Generate and save author mapping dictionaries
         self._save_author_mappings()
@@ -313,6 +539,12 @@ class DataLoader(ABC):
             author_names = row.get(MainDataSchema.AUTHOR_NAMES.colname, [])
             author_ids = row.get(MainDataSchema.AUTHOR_IDS.colname, [])
             
+            # Handle None values gracefully
+            if author_names is None:
+                author_names = []
+            if author_ids is None:
+                author_ids = []
+            
             # Ensure we have lists
             if isinstance(author_names, str):
                 author_names = [author_names]
@@ -322,6 +554,10 @@ class DataLoader(ABC):
             # Handle case where we have names but no IDs (use names as IDs)
             if author_names and not author_ids:
                 author_ids = author_names
+            
+            # Skip rows with no author information
+            if not author_ids:
+                continue
             
             # Build mappings
             for i, author_id in enumerate(author_ids):
@@ -348,13 +584,13 @@ class DataLoader(ABC):
         # Save the mappings
         clean_dir = self.dataset_dirs["clean"]
         
-        write_pickle(dict(authorId_to_df_row), os.path.join(clean_dir, 'authorId_to_df_row.pkl'))
+        write_pickle(os.path.join(clean_dir, 'authorId_to_df_row.pkl'), dict(authorId_to_df_row))
         log_print("Saved authorId_to_df_row.pkl", level="info")
         
-        write_pickle(author_to_authorId, os.path.join(clean_dir, 'author_to_authorId.pkl'))
+        write_pickle(os.path.join(clean_dir, 'author_to_authorId.pkl'), author_to_authorId)
         log_print("Saved author_to_authorId.pkl", level="info")
         
-        write_pickle(authorId_to_author, os.path.join(clean_dir, 'authorId_to_author.pkl'))
+        write_pickle(os.path.join(clean_dir, 'authorId_to_author.pkl'), authorId_to_author)
         log_print("Saved authorId_to_author.pkl", level="info")
     
 
@@ -364,35 +600,16 @@ class DataLoader(ABC):
             raise RuntimeError("Validation not run yet.")
 
         return {
-            "input_path": self.input_path,
+            "input_paths": [str(path) for path in self.input_paths],
             "dataset_dir": self.dataset_dirs["root"],
             "total_rows": len(self.df),
             "valid_rows": int(self._valid_mask.sum()),
             "invalid_rows": int((~self._valid_mask).sum()),
             "date_range": {
-                "min": str(self.df[MainDataSchema.DATE].min()),
-                "max": str(self.df[MainDataSchema.DATE].max())
+                "min": str(self.df[MainDataSchema.DATE.colname].min()),
+                "max": str(self.df[MainDataSchema.DATE.colname].max())
             }
         }
-
-    def _apply_preprocessors(self):
-        """
-        Apply author disambiguation. Text preprocessing handled by MstmlOrchestrator.
-        """
-        if self.df is None or self.df.empty:
-            raise ValueError("Dataframe is empty. Cannot apply preprocessors.")
-
-        # Disambiguate authors
-        if self.author_disambiguator:
-            try:
-                self.df[MainDataSchema.AUTHOR_IDS.colname] = self.author_disambiguator.update_dataframe(
-                    self.df, MainDataSchema.AUTHOR_NAMES.colname
-                )
-                log_print("Applied author disambiguation", level="info")
-            except Exception as e:
-                log_print(f"Author disambiguation failed: {e}", level="warning")
-        else:
-            log_print("No author disambiguator provided - using author names as IDs", level="info")
 
 
 """============================================================================
@@ -403,20 +620,31 @@ to a valid JSON file with one document per entry should be passed as
 input_path. The data will be loaded and preprocessed accordingly.
 
 ============================================================================"""
+@register_data_loader('json', 'jsonl')
 class JsonDataLoader(DataLoader):
     def _load_raw_data(self):
         """
-        Loads JSON lines file (one JSON object per line).
+        Loads JSON lines file(s) (one JSON object per line).
+        If multiple files are provided, concatenates all entries.
         Sets self.raw_data to a list of parsed entries.
         """
-        with open(self.input_path, 'r', encoding='utf-8') as f:
-            self.raw_data = [json.loads(line) for line in f]
-        log_print(f"Loaded {len(self.raw_data)} entries from {self.input_path}", level="info")
+        self.raw_data = []
+        total_entries = 0
+        
+        for input_path in self.input_paths:
+            with open(input_path, 'r', encoding='utf-8') as f:
+                file_data = [json.loads(line) for line in f]
+                self.raw_data.extend(file_data)
+                file_count = len(file_data)
+                total_entries += file_count
+                log_print(f"Loaded {file_count} entries from {input_path}", level="info")
+        
+        log_print(f"Total loaded: {total_entries} entries from {len(self.input_paths)} file(s)", level="info")
 
     def _preprocess(self):
         """
         Converts each raw entry into a row conforming to MainDataSchema using extractors.
-        Then applies additional preprocessing for text and authors.
+        Then applies basic preprocessing (expensive operations like author disambiguation done after filtering).
         """
         rows = []
         for entry in self.raw_data:
@@ -430,4 +658,3 @@ class JsonDataLoader(DataLoader):
                 log_print(f"Skipping malformed entry due to error: {e}", level="warning")
 
         self.df = pd.DataFrame(rows)
-        self._apply_preprocessors()

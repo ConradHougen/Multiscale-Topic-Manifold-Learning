@@ -25,6 +25,7 @@ from sklearn.decomposition import PCA
 from typing import Optional, Union, Dict, Any, List, Tuple
 from collections import defaultdict
 from itertools import combinations
+from pathlib import Path
 
 # Optional imports with fallbacks
 try:
@@ -40,7 +41,8 @@ except ImportError:
     FAISS_AVAILABLE = False
 
 from .dataframe_schema import FieldDef, MainDataSchema
-from .data_loaders import get_project_root_directory, get_data_directory, JsonDataLoader, DataLoader
+from .data_loaders import get_dataset_directory, JsonDataLoader, DataLoader
+from .data_loader_registry import DataLoaderRegistry
 from .author_disambiguation import AuthorDisambiguator
 from .text_preprocessing import TextPreprocessor
 from ._embedding_driver import *
@@ -66,6 +68,7 @@ from collections import OrderedDict
 from ._math_driver import hellinger, diffuse_distribution
 from ._topic_model_driver import setup_author_probs_matrix
 from .fast_encode_tree import fast_encode_tree_structure
+from ._file_driver import get_date_hour_minute
 
 """============================================================================
 Abstract Base Classes for Modular MSTML Components
@@ -523,7 +526,7 @@ class PHATEEmbedding(LowDimEmbedding):
     Default dimensionality reduction method for MSTML topic visualization.
     """
     
-    def __init__(self, n_components: int = 2, knn_neighbors: int = 5, 
+    def __init__(self, n_components: int = 2, knn_neighbors: int = 10,
                  gamma: float = 1.0, t = 'auto', **kwargs):
         self.n_components = n_components
         self.knn_neighbors = knn_neighbors
@@ -671,23 +674,69 @@ class MstmlOrchestrator:
     8. Author/document representation learning and interdisciplinarity ranking for anomaly detection (MSTML core).
     9. Author and author community topic drift mapping for local subnetworks and topic embeddings (MSTML core).
     10. Link prediction in both co-author graphs and hypergraphs (MSTML derivative work).
+    
+    Example Usage:
+        # Basic workflow with automatic experiment directory
+        orchestrator = MstmlOrchestrator("my_research")
+        orchestrator.load_data("data.json", dataset_name="my_research")
+        orchestrator.preprocess_text()
+        orchestrator.setup_coauthor_network()
+        orchestrator.create_temporal_chunks(months_per_chunk=6)
+        orchestrator.train_ensemble_models()
+        orchestrator.build_topic_manifold()
+        orchestrator.compute_author_embeddings()
+        orchestrator.score_interdisciplinarity()
+        
+        # Finalize and save all results
+        exp_dir = orchestrator.finalize_experiment()
+        print(f"Results saved to: {exp_dir}")
+        
+        # Custom experiment directory
+        orchestrator = MstmlOrchestrator(
+            experiment_name="topic_analysis"
+            experiment_directory="/path/to/my_analysis_v2",
+        )
+        
+        # Restore previous state
+        restored = MstmlOrchestrator.load_orchestrator_state("path/to/state.pkl")
     """
-    def __init__(self, 
-                 data_directory: Optional[str] = None,
+    def __init__(self,
+                 dataset_name: str,
+                 experiment_name: str = "mstml",
+                 experiment_directory: Optional[str] = None,
                  config: Optional[dict] = None,
                  logger: Optional[logging.Logger] = None):
         """
         Initialize MSTML Orchestrator with data directory and configuration.
         
         Args:
-            data_directory: Path to data directory, defaults to project data/
+            dataset_name: Name of dataset to load, e.g. "arxiv"
+            experiment_directory: Path to experiment directory for results, auto-generated if None
+            experiment_name: Prefix that describes the current experiment type
             config: Configuration dictionary for model parameters
             logger: Custom logger, creates default if None
         """
         # Core configuration
-        self.data_directory = data_directory or get_data_directory()
+        self.dataset_name = dataset_name
+        self.dataset_directory = get_dataset_directory(dataset_name)
         self.config = config or self._get_default_config()
         self.logger = logger or self._setup_logger()
+        
+        # Experiment directory setup
+        self.experiment_name = experiment_name
+        if experiment_directory is None:
+            # Auto-generate experiment directory with timestamp
+            timestamp = get_date_hour_minute()
+            exp_dir_name = f"{experiment_name}_{timestamp}"
+            # Convert to Path object if it's a string
+            data_path = Path(self.dataset_directory) if isinstance(self.dataset_directory, str) else self.dataset_directory
+            self.experiment_directory = str(data_path.parent / "experiments" / exp_dir_name)
+        else:
+            self.experiment_directory = experiment_directory
+        
+        # Create experiment directory
+        os.makedirs(self.experiment_directory, exist_ok=True)
+        self.logger.info(f"Experiment directory: {self.experiment_directory}")
         
         # Data management
         self.schema = None
@@ -739,6 +788,52 @@ class MstmlOrchestrator:
         
         self.logger.info("MstmlOrchestrator initialized")
 
+    def set_experiment_directory(self, experiment_directory: str, create_if_missing: bool = True):
+        """
+        Set a custom experiment directory for saving results.
+        
+        Args:
+            experiment_directory: Path to experiment directory
+            create_if_missing: Whether to create the directory if it doesn't exist
+        """
+        self.experiment_directory = experiment_directory
+        
+        if create_if_missing:
+            os.makedirs(self.experiment_directory, exist_ok=True)
+        
+        self.logger.info(f"Experiment directory set to: {self.experiment_directory}")
+
+    def save_orchestrator_state(self, filename: Optional[str] = None):
+        """
+        Save the entire orchestrator state to experiment directory for later restoration.
+        
+        Args:
+            filename: Custom filename, auto-generated if None
+        """
+        if filename is None:
+            timestamp = get_date_hour_minute()
+            filename = f"mstml_orchestrator_state_{timestamp}.pkl"
+        
+        state_path = os.path.join(self.experiment_directory, filename)
+        write_pickle(state_path, self)
+        self.logger.info(f"Orchestrator state saved to {state_path}")
+        return state_path
+
+    @staticmethod
+    def load_orchestrator_state(state_path: str) -> 'MstmlOrchestrator':
+        """
+        Load a previously saved orchestrator state.
+        
+        Args:
+            state_path: Path to saved orchestrator state file
+            
+        Returns:
+            Restored MstmlOrchestrator instance
+        """
+        orchestrator = read_pickle(state_path)
+        orchestrator.logger.info(f"Orchestrator state loaded from {state_path}")
+        return orchestrator
+
     def _set_default_components(self):
         """Initialize default components based on configuration."""
         # Initialize default distance metric
@@ -757,19 +852,25 @@ class MstmlOrchestrator:
     # 1. DATA LOADING AND MANAGEMENT
     # ========================================================================================
     
-    def load_data(self, 
-                  data_source: str,
-                  dataset_name: Optional[str] = None,
+    def load_data(self,
+                  original_data_fnames: Optional[Union[str, List[str]]] = None,
                   author_disambiguation: bool = True,
-                  overwrite: bool = False) -> 'MstmlOrchestrator':
+                  overwrite: bool = False,
+                  data_filters: Optional[Dict[str, any]] = None) -> 'MstmlOrchestrator':
         """
         Load and validate document corpus data using DataLoader pipeline.
         
         Args:
-            data_source: Path to data file or identifier
-            dataset_name: Name for the dataset (auto-generated if not provided)
+            original_data_fnames: Filename(s) of source data in data/<dataset_name>/original
+                                 Can be a single string, list of strings, or None for auto-discovery
+                                 If None, all supported files in original/ directory will be loaded
             author_disambiguation: Whether to apply author disambiguation
             overwrite: Whether to overwrite existing processed data
+            data_filters: Optional dict of filters to apply before expensive operations
+                         Example: {
+                             'date_range': {'start': '2020-01-01', 'end': '2023-12-31'},
+                             'categories': ['cs.AI', 'cs.LG', 'stat.ML']
+                         }
         
         Returns:
             Self for method chaining
@@ -779,25 +880,62 @@ class MstmlOrchestrator:
             self.logger.info("Data already loaded. Use overwrite=True to reload.")
             return self
             
-        self.logger.info(f"Loading data from {data_source}")
+        self.logger.info(f"Loading uncleaned data from {self.dataset_directory}/original/")
         
-        # Generate dataset name if not provided
-        if dataset_name is None:
-            dataset_name = os.path.splitext(os.path.basename(data_source))[0]
+        # Handle filename input or auto-discovery
+        if original_data_fnames is None:
+            # Auto-discover all supported files in original directory
+            filenames = self._discover_data_files()
+            self.logger.info(f"Auto-discovered {len(filenames)} file(s): {filenames}")
+        elif isinstance(original_data_fnames, str):
+            filenames = [original_data_fnames]
+            self.logger.info(f"Loading specified file: {filenames[0]}")
+        else:
+            filenames = original_data_fnames
+            self.logger.info(f"Loading {len(filenames)} specified file(s): {filenames}")
         
         # Initialize author disambiguator if requested
         disambiguator = AuthorDisambiguator() if author_disambiguation else None
         
-        # Create data loader based on file extension
-        if data_source.endswith('.json'):
-            self.data_loader = JsonDataLoader(
-                input_path=data_source,
-                dataset_name=dataset_name,
+        # Validate that we have files to load
+        if not filenames:
+            raise ValueError("No files to load. Either specify filenames or ensure supported files exist in original/ directory.")
+        
+        # Create data loader based on file extension(s) using registry
+        # Collect all file extensions
+        file_extensions = set()
+        for fname in filenames:
+            ext = fname.split('.')[-1].lower()
+            file_extensions.add(ext)
+        
+        # Check if all files are compatible using registry
+        if DataLoaderRegistry.are_extensions_compatible(file_extensions):
+            # Get the appropriate loader class from registry
+            loader_class = DataLoaderRegistry.get_loader_for_extensions(file_extensions)
+            self.data_loader = loader_class(
+                input_path=filenames,  # Pass list of filenames
+                dataset_name=self.dataset_name,
                 overwrite=overwrite,
-                author_disambiguator=disambiguator
+                author_disambiguator=disambiguator,
+                data_filters=data_filters
             )
         else:
-            raise ValueError(f"Unsupported data format for {data_source}")
+            # Get supported extensions for error message
+            supported_extensions = DataLoaderRegistry.get_supported_extensions()
+            if len(file_extensions) == 1:
+                # Single unsupported extension
+                ext = list(file_extensions)[0]
+                raise ValueError(
+                    f"Unsupported data format: .{ext}. "
+                    f"Supported formats: {sorted(supported_extensions)}"
+                )
+            else:
+                # Mixed incompatible formats
+                raise ValueError(
+                    f"Incompatible file formats detected: {sorted(file_extensions)}. "
+                    f"All files must be handled by the same loader. "
+                    f"Supported formats: {sorted(supported_extensions)}"
+                )
         
         # Run the complete data loading pipeline
         self.data_loader.run()
@@ -807,6 +945,37 @@ class MstmlOrchestrator:
         self.logger.info(f"Loaded {len(self.documents_df)} documents")
         
         return self
+    
+    def _discover_data_files(self) -> List[str]:
+        """
+        Auto-discover all supported data files in the original directory.
+        
+        Returns:
+            List of filenames found in the original directory
+            
+        Raises:
+            FileNotFoundError: If original directory doesn't exist
+            ValueError: If no supported files are found
+        """
+        original_dir = Path(self.dataset_directory) / "original"
+        
+        if not original_dir.exists():
+            raise FileNotFoundError(f"Original data directory not found: {original_dir}")
+        
+        # Use registry to discover supported files
+        discovered_files = DataLoaderRegistry.discover_supported_files(original_dir)
+        
+        if not discovered_files:
+            available_files = [f.name for f in original_dir.iterdir() if f.is_file()]
+            supported_extensions = DataLoaderRegistry.get_supported_extensions()
+            raise ValueError(
+                f"No supported data files found in {original_dir}. "
+                f"Supported extensions: {sorted(supported_extensions)}. "
+                f"Available files: {available_files}"
+            )
+        
+        self.logger.info(f"Discovered {len(discovered_files)} supported file(s) in {original_dir}")
+        return discovered_files
     
     def setup_coauthor_network(self, 
                               min_collaborations: int = 1,
@@ -999,151 +1168,164 @@ class MstmlOrchestrator:
         
         # Save vocabulary dictionary
         dict_path = os.path.join(clean_dir, 'id2word.pkl')
-        write_pickle(self.vocabulary, dict_path)
+        write_pickle(dict_path, self.vocabulary)
         self.logger.info(f"Saved vocabulary dictionary with {len(self.vocabulary)} terms to id2word.pkl")
         
         # Save preprocessed corpus
         corpus_path = os.path.join(clean_dir, 'preprocessed_corpus.pkl')
-        write_pickle(self.preprocessed_corpus, corpus_path)
+        write_pickle(corpus_path, self.preprocessed_corpus)
         self.logger.info("Saved preprocessed corpus to preprocessed_corpus.pkl")
         
         # Save BOW corpus
         bow_path = os.path.join(clean_dir, 'bow_corpus.pkl')
-        write_pickle(self.bow_corpus, bow_path)
+        write_pickle(bow_path, self.bow_corpus)
         self.logger.info("Saved bag-of-words corpus to bow_corpus.pkl")
         
-        # Save preprocessing statistics
-        stats_path = os.path.join(clean_dir, 'preprocessing_stats.json')
+        # Save preprocessing statistics to experiment directory
+        stats_path = os.path.join(self.experiment_directory, 'preprocessing_stats.json')
         with open(stats_path, 'w') as f:
             json.dump(self.text_preprocessor.get_stats_log(), f, indent=2)
-        self.logger.info("Saved preprocessing statistics to preprocessing_stats.json")
+        self.logger.info(f"Saved preprocessing statistics to {stats_path}")
     
     
     # ========================================================================================
     # 3. TEMPORAL ENSEMBLE TOPIC MODELING
     # ========================================================================================
     
-    def create_temporal_chunks(self,
-                             chunk_size: Optional[int] = None,
-                             chunk_duration: Optional[str] = None,
-                             overlap_factor: float = 0.0) -> 'MstmlOrchestrator':
+    def create_temporal_chunks(self, 
+                             months_per_chunk: int = 6,
+                             save_statistics: bool = True,
+                             create_plot: bool = True,
+                             save_plot: bool = True) -> 'MstmlOrchestrator':
         """
         Split corpus into temporal chunks for ensemble learning.
         
         Args:
-            chunk_size: Number of documents per chunk
-            chunk_duration: Time duration per chunk (e.g., '3M' for 3 months)
-            overlap_factor: Fraction of overlap between adjacent chunks
+            months_per_chunk: Number of months per temporal chunk
+            save_statistics: Whether to save chunk statistics to file
+            create_plot: Whether to create a visualization of chunk sizes
+            save_plot: Whether to save the plot to file
         
         Returns:
             Self for method chaining
         """
-        
         if self.documents_df is None:
             raise ValueError("No documents loaded. Call load_data() first.")
         
-        self.logger.info("Creating temporal chunks")
+        self.logger.info(f"Creating temporal chunks with {months_per_chunk} months per chunk")
         
         # Ensure date column is datetime
         if 'date' not in self.documents_df.columns:
             raise ValueError("Documents dataframe must have a 'date' column")
         
         df = self.documents_df.copy()
+        # Ensure 'date' column is in datetime format
         df['date'] = pd.to_datetime(df['date'])
-        df = df.sort_values('date').reset_index(drop=True)
         
+        # Group by the specified interval and create chunks
+        chunks = [group for _, group in df.groupby(pd.Grouper(key='date', freq=f'{months_per_chunk}M'))]
+        
+        # Convert to the expected format
         self.time_chunks = []
-        
-        if chunk_duration is not None:
-            # Time-based chunking
-            min_date = df['date'].min()
-            max_date = df['date'].max()
-            
-            # Parse duration (e.g., '3M' -> 3 months)
-            duration_match = re.match(r'(\d+)([YMWD])', chunk_duration.upper())
-            if not duration_match:
-                raise ValueError(f"Invalid chunk_duration format: {chunk_duration}. Use format like '3M', '6M', '1Y'")
-            
-            duration_value = int(duration_match.group(1))
-            duration_unit = duration_match.group(2)
-            
-            if duration_unit == 'M':
-                freq = pd.DateOffset(months=duration_value)
-            elif duration_unit == 'Y':
-                freq = pd.DateOffset(years=duration_value)
-            elif duration_unit == 'W':
-                freq = pd.DateOffset(weeks=duration_value)
-            elif duration_unit == 'D':
-                freq = pd.DateOffset(days=duration_value)
-            else:
-                raise ValueError(f"Unsupported duration unit: {duration_unit}")
-            
-            # Create chunks based on time windows
-            current_date = min_date
-            chunk_id = 0
-            
-            while current_date < max_date:
-                chunk_end = min(current_date + freq, max_date)
-                
-                # Get documents in this time window
-                chunk_mask = (df['date'] >= current_date) & (df['date'] < chunk_end)
-                chunk_docs = df[chunk_mask].index.tolist()
-                
-                if len(chunk_docs) > 0:  # Only create chunk if it has documents
-                    chunk_info = {
-                        'chunk_id': chunk_id,
-                        'start_date': current_date,
-                        'end_date': chunk_end,
-                        'document_indices': chunk_docs,
-                        'num_documents': len(chunk_docs)
-                    }
-                    self.time_chunks.append(chunk_info)
-                    chunk_id += 1
-                
-                # Move to next time window (with overlap if specified)
-                overlap_offset = freq * overlap_factor if overlap_factor > 0 else pd.DateOffset(0)
-                current_date = chunk_end - overlap_offset
-        
-        elif chunk_size is not None:
-            # Document count-based chunking
-            total_docs = len(df)
-            overlap_size = int(chunk_size * overlap_factor)
-            
-            chunk_id = 0
-            start_idx = 0
-            
-            while start_idx < total_docs:
-                end_idx = min(start_idx + chunk_size, total_docs)
-                chunk_docs = list(range(start_idx, end_idx))
-                
+        for chunk_id, chunk_df in enumerate(chunks):
+            if not chunk_df.empty:  # Only include non-empty chunks
                 chunk_info = {
                     'chunk_id': chunk_id,
-                    'start_date': df.iloc[start_idx]['date'],
-                    'end_date': df.iloc[end_idx-1]['date'],
-                    'document_indices': chunk_docs,
-                    'num_documents': len(chunk_docs)
+                    'start_date': chunk_df['date'].min(),
+                    'end_date': chunk_df['date'].max(),
+                    'document_indices': chunk_df.index.tolist(),
+                    'num_documents': len(chunk_df)
                 }
                 self.time_chunks.append(chunk_info)
-                
-                chunk_id += 1
-                start_idx = end_idx - overlap_size  # Apply overlap
         
-        else:
-            raise ValueError("Either chunk_size or chunk_duration must be specified")
-        
-        self.logger.info(
-            f"Created {len(self.time_chunks)} temporal chunks "
-            f"(overlap_factor={overlap_factor})"
-        )
+        self.logger.info(f"Created {len(self.time_chunks)} temporal chunks")
         
         # Log chunk statistics
-        chunk_sizes = [chunk['num_documents'] for chunk in self.time_chunks]
-        self.logger.info(
-            f"Chunk sizes - min: {min(chunk_sizes)}, max: {max(chunk_sizes)}, "
-            f"mean: {np.mean(chunk_sizes):.1f}"
-        )
+        if self.time_chunks:
+            chunk_sizes = [chunk['num_documents'] for chunk in self.time_chunks]
+            self.logger.info(
+                f"Chunk sizes - min: {min(chunk_sizes)}, max: {max(chunk_sizes)}, "
+                f"mean: {np.mean(chunk_sizes):.1f}"
+            )
+            
+            # Save statistics to file
+            if save_statistics:
+                self._save_chunk_statistics(months_per_chunk, chunk_sizes)
+            
+            # Create and optionally save plot
+            if create_plot:
+                self._create_chunk_plot(months_per_chunk, chunk_sizes, save_plot)
         
         return self
+    
+    def _save_chunk_statistics(self, months_per_chunk: int, chunk_sizes: List[int]):
+        """Save temporal chunk statistics to JSON file."""
+        # Use experiment directory for all results
+        save_dir = self.experiment_directory
+        
+        stats = {
+            'months_per_chunk': months_per_chunk,
+            'num_chunks': len(chunk_sizes),
+            'chunk_sizes': chunk_sizes,
+            'min_size': min(chunk_sizes),
+            'max_size': max(chunk_sizes),
+            'mean_size': float(np.mean(chunk_sizes)),
+            'std_size': float(np.std(chunk_sizes)),
+            'total_documents': sum(chunk_sizes),
+            'chunk_date_ranges': [
+                {
+                    'chunk_id': chunk['chunk_id'],
+                    'start_date': chunk['start_date'].strftime('%Y-%m-%d'),
+                    'end_date': chunk['end_date'].strftime('%Y-%m-%d'),
+                    'num_documents': chunk['num_documents']
+                }
+                for chunk in self.time_chunks
+            ]
+        }
+        
+        stats_path = os.path.join(save_dir, f'temporal_chunks_{months_per_chunk}month_stats.json')
+        with open(stats_path, 'w') as f:
+            json.dump(stats, f, indent=2)
+        
+        self.logger.info(f"Saved temporal chunk statistics to {stats_path}")
+    
+    def _create_chunk_plot(self, months_per_chunk: int, chunk_sizes: List[int], save_plot: bool):
+        """Create visualization of temporal chunk sizes."""
+        # Create month-year labels for each chunk based on the first date in each chunk
+        chunk_labels = [chunk['start_date'].strftime('%b-%Y') for chunk in self.time_chunks]
+        
+        # Calculate tick intervals to label up to 20 bars
+        if len(chunk_labels) <= 20:
+            tick_indices = np.arange(len(chunk_labels))  # Label all bars if there are 20 or fewer
+        else:
+            tick_interval = max(1, len(chunk_labels) // 20)  # Calculate interval to label up to 20 bars
+            tick_indices = np.arange(0, len(chunk_labels), tick_interval)  # Select indices to label
+        
+        # Plotting
+        plt.figure(figsize=(12, 6))
+        bars = plt.bar(list(range(len(chunk_sizes))), chunk_sizes)  # Plot with the indices of the chunks
+        plt.xlabel("Time Chunk")
+        plt.ylabel("Number of Documents")
+        plt.title(f"Number of Documents in {months_per_chunk}-Month Chunks")
+        
+        # Customize x-axis ticks with formatted chunk labels at selected positions
+        plt.xticks(tick_indices, [chunk_labels[i] for i in tick_indices], rotation=45, ha="right")
+        
+        # Add text annotations above selected bars at tick positions
+        for i in tick_indices:
+            plt.text(i, chunk_sizes[i] + max(chunk_sizes) * 0.02,  # Position text slightly above the bar
+                     str(chunk_sizes[i]), ha='center', va='bottom', fontsize=10)
+        
+        plt.tight_layout()
+        
+        # Save the figure
+        if save_plot:
+            # Use experiment directory for all results
+            plot_path = os.path.join(self.experiment_directory, f'document_counts_{months_per_chunk}month_chunks.pdf')
+            plt.savefig(plot_path, bbox_inches='tight')
+            self.logger.info(f"Saved temporal chunk plot to {plot_path}")
+        
+        plt.show()
     
     def apply_temporal_smoothing(self,
                                decay_parameter: float = 0.75) -> 'MstmlOrchestrator':
@@ -2194,8 +2376,8 @@ class MstmlOrchestrator:
             color_suffix = f"_{self.embed_params.get('color_by', 'default')}"
             filename = f"{method_name}_topic_embedding{color_suffix}_{timestamp}"
         
-        # Construct full path using data directory as base
-        save_path = os.path.join(self.data_directory, f"{filename}.{format}")
+        # Construct full path using experiment directory for results
+        save_path = os.path.join(self.experiment_directory, f"{filename}.{format}")
         
         # Ensure directory exists
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -2313,27 +2495,128 @@ class MstmlOrchestrator:
         return result
     
     def export_results(self,
-                      output_directory: str,
+                      output_directory: Optional[str] = None,
                       formats: Optional[List[str]] = None) -> 'MstmlOrchestrator':
         """
-        Export analysis results in multiple formats.
+        Export analysis results in multiple formats to experiment directory.
         
         Args:
-            output_directory: Directory for output files
-            formats: List of output formats
+            output_directory: Directory for output files (defaults to experiment_directory)
+            formats: List of output formats ('json', 'csv', 'pkl')
         
         Returns:
             Self for method chaining
         """
-        if formats is None:
-            formats = ['json', 'csv', 'pkl']
+        if output_directory is None:
+            output_directory = self.experiment_directory
             
-        # TODO: Implement results export
-        # - Export topic models, embeddings, and analysis results
-        # - Support multiple formats (JSON, CSV, pickle)
-        # - Include metadata and configuration information
+        if formats is None:
+            formats = ['json', 'pkl']
+            
+        os.makedirs(output_directory, exist_ok=True)
         self.logger.info(f"Exporting results to {output_directory} in formats: {formats}")
+        
+        # Export topic vectors if available
+        if self.topic_vectors is not None:
+            if 'pkl' in formats:
+                write_pickle(os.path.join(output_directory, 'topic_vectors.pkl'), self.topic_vectors)
+            if 'json' in formats:
+                topic_vectors_list = [vec.tolist() for vec in self.topic_vectors]
+                with open(os.path.join(output_directory, 'topic_vectors.json'), 'w') as f:
+                    json.dump(topic_vectors_list, f, indent=2)
+        
+        # Export topic embedding if available
+        if self.topic_embedding is not None:
+            if 'pkl' in formats:
+                write_pickle(os.path.join(output_directory, 'topic_embedding.pkl'), self.topic_embedding)
+            if 'json' in formats:
+                with open(os.path.join(output_directory, 'topic_embedding.json'), 'w') as f:
+                    json.dump(self.topic_embedding.tolist(), f, indent=2)
+        
+        # Export author embeddings if available
+        if self.author_topic_distributions is not None:
+            if 'pkl' in formats:
+                write_pickle(os.path.join(output_directory, 'author_embeddings.pkl'), self.author_topic_distributions)
+            if 'json' in formats:
+                # Convert numpy arrays to lists for JSON serialization
+                json_embeddings = {
+                    author: embedding.tolist() if hasattr(embedding, 'tolist') else embedding
+                    for author, embedding in self.author_topic_distributions.items()
+                }
+                with open(os.path.join(output_directory, 'author_embeddings.json'), 'w') as f:
+                    json.dump(json_embeddings, f, indent=2)
+        
+        # Export interdisciplinarity scores if available
+        if self.interdisciplinarity_scores:
+            if 'pkl' in formats:
+                write_pickle(os.path.join(output_directory, 'interdisciplinarity_scores.pkl'), self.interdisciplinarity_scores)
+            if 'json' in formats:
+                with open(os.path.join(output_directory, 'interdisciplinarity_scores.json'), 'w') as f:
+                    json.dump(self.interdisciplinarity_scores, f, indent=2)
+        
+        # Export time chunks information if available
+        if self.time_chunks:
+            if 'pkl' in formats:
+                write_pickle(os.path.join(output_directory, 'time_chunks.pkl'), self.time_chunks)
+            if 'json' in formats:
+                # Convert datetime objects to strings for JSON
+                json_chunks = []
+                for chunk in self.time_chunks:
+                    json_chunk = chunk.copy()
+                    json_chunk['start_date'] = chunk['start_date'].strftime('%Y-%m-%d')
+                    json_chunk['end_date'] = chunk['end_date'].strftime('%Y-%m-%d')
+                    json_chunks.append(json_chunk)
+                with open(os.path.join(output_directory, 'time_chunks.json'), 'w') as f:
+                    json.dump(json_chunks, f, indent=2)
+        
+        # Export configuration and metadata
+        export_metadata = {
+            'experiment_directory': self.experiment_directory,
+            'dataset_directory': str(self.dataset_directory),
+            'config': self.config,
+            'analysis_components': {
+                'has_topic_vectors': self.topic_vectors is not None,
+                'has_topic_embedding': self.topic_embedding is not None,
+                'has_author_embeddings': self.author_topic_distributions is not None,
+                'has_interdisciplinarity_scores': bool(self.interdisciplinarity_scores),
+                'num_time_chunks': len(self.time_chunks),
+                'coauthor_network_nodes': self.coauthor_network.number_of_nodes() if self.coauthor_network else 0,
+                'coauthor_network_edges': self.coauthor_network.number_of_edges() if self.coauthor_network else 0
+            },
+            'export_timestamp': dt.datetime.now().isoformat()
+        }
+        
+        with open(os.path.join(output_directory, 'analysis_metadata.json'), 'w') as f:
+            json.dump(export_metadata, f, indent=2)
+        
+        self.logger.info(f"Results export completed - {len(formats)} formats exported")
         return self
+    
+    def finalize_experiment(self, 
+                          export_results: bool = True, 
+                          save_state: bool = True,
+                          formats: Optional[List[str]] = None) -> str:
+        """
+        Finalize the experiment by saving all results and orchestrator state.
+        
+        Args:
+            export_results: Whether to export analysis results
+            save_state: Whether to save orchestrator state
+            formats: Export formats for results
+            
+        Returns:
+            Path to experiment directory
+        """
+        self.logger.info("Finalizing experiment...")
+        
+        if export_results:
+            self.export_results(formats=formats)
+        
+        if save_state:
+            self.save_orchestrator_state()
+        
+        self.logger.info(f"Experiment finalized in: {self.experiment_directory}")
+        return self.experiment_directory
     
     # ========================================================================================
     # 9. UTILITY AND CONFIGURATION METHODS

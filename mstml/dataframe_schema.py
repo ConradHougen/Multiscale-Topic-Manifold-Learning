@@ -35,10 +35,17 @@ class MainDataSchema(Enum):
     )
     AUTHOR_NAMES = FieldDef(
         "author_names",
-        lambda entry: [
-            a["name"] for a in entry.get("authors", [])
-            if isinstance(a, dict) and "name" in a
-        ],
+        lambda entry: (
+            # Handle None authors
+            [] if entry.get("authors") is None else
+            # Handle list of dictionaries with "name" key
+            [a["name"] for a in entry.get("authors", []) 
+             if isinstance(a, dict) and "name" in a] if 
+            any(isinstance(a, dict) for a in entry.get("authors", [])) else
+            # Handle list of strings directly
+            [str(a) for a in entry.get("authors", []) 
+             if isinstance(a, str) and a.strip()]
+        ),
         list
     )
     AUTHOR_IDS = FieldDef("author_ids", lambda entry: None, list)

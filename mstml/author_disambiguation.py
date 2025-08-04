@@ -209,6 +209,13 @@ class AuthorDisambiguator:
         filtered_author_lists = []
         
         for idx, authors in enumerate(all_author_lists):
+            # Handle None or non-list authors
+            if authors is None:
+                authors = []
+            elif not isinstance(authors, list):
+                log_print(f"Skipping document at index {idx} with non-list authors: {type(authors)}", level="warning")
+                continue
+                
             if len(authors) <= self.max_authors_per_doc:
                 valid_indices.append(idx)
                 filtered_author_lists.append(authors)
@@ -217,7 +224,14 @@ class AuthorDisambiguator:
         
         # Perform disambiguation on valid author lists
         if not self._is_fitted:
-            self.fit(filtered_author_lists)
+            if not filtered_author_lists:
+                log_print("No valid author lists found for disambiguation. All author_ids will be empty.", level="warning")
+                # Set up empty mappings to avoid None issues
+                self.author_name_to_id = {}
+                self.author_id_to_names = {}
+                self._is_fitted = True
+            else:
+                self.fit(filtered_author_lists)
         
         # Generate author IDs for each document
         result_series = pd.Series([[] for _ in range(len(df))], index=df.index)
@@ -254,7 +268,12 @@ class AuthorDisambiguator:
             # Extract and standardize all unique author names
             all_authors = self._extract_and_standardize_authors(author_lists)
             if not all_authors:
-                raise ValueError("No valid authors found after standardization")
+                log_print("No valid authors found after standardization. Setting up empty mappings.", level="warning")
+                # Set up empty mappings instead of failing
+                self.author_name_to_id = {}
+                self.author_id_to_names = {}
+                self._is_fitted = True
+                return self
                 
             unique_authors = sorted(list(set(all_authors)))
         except Exception as e:
@@ -536,9 +555,9 @@ class AuthorDisambiguator:
             name_to_id_path = os.path.join(directory, 'author_name_to_id.pkl')
             id_to_names_path = os.path.join(directory, 'author_id_to_names.pkl')
             
-            write_pickle(self.author_name_to_id, name_to_id_path)
+            write_pickle(name_to_id_path, self.author_name_to_id)
                 
-            write_pickle(self.author_id_to_names, id_to_names_path)
+            write_pickle(id_to_names_path, self.author_id_to_names)
             
             # Save ID pool state
             pool_state_path = os.path.join(directory, 'id_pool_state.pkl')
@@ -549,7 +568,7 @@ class AuthorDisambiguator:
                 'initial_id_digits': self.initial_id_digits
             }
             
-            write_pickle(pool_state, pool_state_path)
+            write_pickle(pool_state_path, pool_state)
                 
             log_print(f"Saved author mappings and ID pool state to {directory}", level="info")
             
