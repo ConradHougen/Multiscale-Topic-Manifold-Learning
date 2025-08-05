@@ -106,7 +106,7 @@ orchestrator.preprocess_text(
 ## Repository Structure
 
 ```
-Multi-Scale-Topic-Manifold-Learning/
+Multiscale-Topic-Manifold-Learning/
 ├── mstml/                      # Core MSTML package
 │   ├── __init__.py            # Main package imports
 │   ├── core.py                # MstmlOrchestrator and core functionality
