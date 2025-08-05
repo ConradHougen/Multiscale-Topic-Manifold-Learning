@@ -650,11 +650,11 @@ class DataLoader(ABC):
         
         df_path = os.path.join(self.dataset_dirs["clean"], 'main_df.pkl')
         write_pickle(df_path, self.df)
-        log_print(f"Saved full dataframe to: {df_path}", level="info")
+        log_print(f"Saved main dataframe to: {df_path}", level="info")
 
-        # Save clean and NA views for inspection
-        write_pickle(os.path.join(self.dataset_dirs["clean"], 'clean_df.pkl'), self.get_clean_df())
-        write_pickle(os.path.join(self.dataset_dirs["clean"], 'na_df.pkl'), self.get_na_df())
+        # Note: Removed unnecessary files for cleaner output:
+        # - clean_df.pkl (redundant with main_df.pkl - can filter valid rows if needed)  
+        # - na_df.pkl (can be generated from main_df if inspection needed)
 
         # Generate and save author mapping dictionaries
         self._save_author_mappings()

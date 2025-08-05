@@ -756,6 +756,14 @@ class MstmlOrchestrator:
         self.config = config or self._get_default_config()
         self.logger = logger or self._setup_logger()
         
+        # Initialize experiment parameters for tracking
+        self.experiment_params = {
+            'dataset_name': dataset_name,
+            'experiment_name': experiment_name,
+            'experiment_directory': None,  # Will be set after directory creation
+            'steps': {}
+        }
+        
         # Experiment directory setup
         self.experiment_name = experiment_name
         if experiment_directory is None:
@@ -772,6 +780,7 @@ class MstmlOrchestrator:
         
         # Create experiment directory
         os.makedirs(self.experiment_directory, exist_ok=True)
+        self.experiment_params['experiment_directory'] = self.experiment_directory
         self.logger.info(f"Experiment directory: {self.experiment_directory}")
         
         # Component configuration - accept user-provided components or create defaults
@@ -1412,6 +1421,10 @@ class MstmlOrchestrator:
             self.logger.warning("No filters configured. Call configure_data_filters() first or pass filter parameters.")
             return self
         
+        # Track hyperparameters for this step
+        filter_params = filters.copy()
+        self._track_step_params('data_filtering', filter_params)
+        
         # Apply each filter and report results
         current_df = self.documents_df.copy()
         
@@ -1457,6 +1470,68 @@ class MstmlOrchestrator:
         
         return self
     
+    def _track_step_params(self, step_name: str, params: dict):
+        """Track hyperparameters for a processing step."""
+        self.experiment_params['steps'][step_name] = {
+            'timestamp': get_date_hour_minute(),
+            'parameters': params.copy()
+        }
+        
+        # Save updated params to experiment directory
+        params_path = os.path.join(self.experiment_directory, 'experiment_params.json')
+        with open(params_path, 'w') as f:
+            json.dump(self.experiment_params, f, indent=2, default=str)
+    
+    def _copy_essential_files_to_experiment(self):
+        """Copy essential files to experiment directory for reproducibility."""
+        if not hasattr(self, 'data_loader') or not self.data_loader:
+            self.logger.warning("No data loader available - cannot copy essential files")
+            return
+            
+        clean_dir = self.data_loader.dataset_dirs["clean"]
+        essential_files = [
+            'main_df.pkl',
+            'id2word.pkl', 
+            'author_to_authorId.pkl',
+            'authorId_to_author.pkl',
+            'authorId_to_df_row.pkl'
+        ]
+        
+        copied_files = []
+        for filename in essential_files:
+            src_path = os.path.join(clean_dir, filename)
+            dst_path = os.path.join(self.experiment_directory, filename)
+            
+            if os.path.exists(src_path):
+                import shutil
+                shutil.copy2(src_path, dst_path)
+                copied_files.append(filename)
+            else:
+                self.logger.warning(f"Essential file not found: {filename}")
+        
+        self.logger.info(f"Copied {len(copied_files)} essential files to experiment directory: {copied_files}")
+    
+    def _update_main_dataframe(self):
+        """Update main_df.pkl in both clean directory and experiment directory when dataframe is modified."""
+        if not hasattr(self, 'data_loader') or not self.data_loader:
+            self.logger.warning("No data loader available - cannot update main_df.pkl")
+            return
+            
+        if self.documents_df is None:
+            self.logger.warning("No documents dataframe available - cannot update main_df.pkl")
+            return
+        
+        # Update in clean directory
+        clean_dir = self.data_loader.dataset_dirs["clean"]
+        clean_path = os.path.join(clean_dir, 'main_df.pkl')
+        write_pickle(clean_path, self.documents_df)
+        
+        # Update in experiment directory
+        exp_path = os.path.join(self.experiment_directory, 'main_df.pkl')
+        write_pickle(exp_path, self.documents_df)
+        
+        self.logger.info(f"Updated main_df.pkl in both clean directory and experiment directory ({len(self.documents_df)} rows)")
+    
     def apply_author_disambiguation(self) -> 'MstmlOrchestrator':
         """
         Apply author disambiguation to already loaded and filtered data.
@@ -1483,18 +1558,31 @@ class MstmlOrchestrator:
             disambiguator = AuthorDisambiguator()
             self._author_disambiguator = disambiguator
         
+        # Track hyperparameters for this step
+        disambig_params = {
+            'similarity_threshold': getattr(disambiguator, 'similarity_threshold', 'default'),
+            'max_authors_per_doc': getattr(disambiguator, 'max_authors_per_doc', 'default'),
+            'ngram_range': getattr(disambiguator, 'ngram_range', 'default')
+        }
+        self._track_step_params('author_disambiguation', disambig_params)
+        
         initial_count = len(self.documents_df)
         self.logger.info(f"Applying author disambiguation to {initial_count} documents")
         
         # Apply author disambiguation to the current dataframe
-        processed_series = disambiguator.update_dataframe(self.documents_df)
+        processed_series = disambiguator.update_dataframe(
+            self.documents_df, 
+            MainDataSchema.AUTHOR_NAMES.colname
+        )
         
         # Update the dataframe with author IDs
-        from .dataframe_schema import MainDataSchema
         self.documents_df[MainDataSchema.AUTHOR_IDS.colname] = processed_series
         
         final_count = len(self.documents_df)
         self.logger.info(f"Author disambiguation completed on {final_count} documents")
+        
+        # Update main_df.pkl with the new author IDs column
+        self._update_main_dataframe()
         
         return self
 
@@ -1667,6 +1755,20 @@ class MstmlOrchestrator:
         if self.documents_df is None:
             raise ValueError("No documents loaded. Call load_data() first.")
         
+        # Track hyperparameters for this step
+        step_params = {
+            'allowed_categories': allowed_categories,
+            'low_thresh': low_thresh,
+            'high_frac': high_frac,
+            'extra_stopwords': extra_stopwords,
+            'train_lda': train_lda,
+            'num_topics': num_topics,
+            'lda_passes': lda_passes,
+            'lambda_param': lambda_param,
+            'top_n_terms': top_n_terms
+        }
+        self._track_step_params('text_preprocessing', step_params)
+        
         self.logger.info("Starting comprehensive text preprocessing pipeline")
         
         # Initialize TextPreprocessor if not already set
@@ -1690,10 +1792,13 @@ class MstmlOrchestrator:
             top_n_terms=top_n_terms
         )
         
-        # Store results in orchestrator
+        # Store results in orchestrator and update dataframe
         self.preprocessed_corpus = processed_docs.tolist()
         self.vocabulary = self.text_preprocessor.get_dictionary()
         self.bow_corpus = self.text_preprocessor.get_corpus()
+        
+        # Update the main dataframe with preprocessed text
+        self.documents_df[MainDataSchema.PREPROCESSED_TEXT.colname] = processed_docs
         
         # Get preprocessing statistics
         stats = self.text_preprocessor.get_stats_log()
@@ -1705,39 +1810,32 @@ class MstmlOrchestrator:
             f"Final vocab: {stats.get('vocab_final', len(self.vocabulary))}"
         )
         
-        # Save preprocessed results to files
+        # Save essential preprocessing results and copy to experiment directory
         self._save_preprocessing_results()
+        self._copy_essential_files_to_experiment()
+        
+        # Update main_df.pkl with the new preprocessed_text column
+        self._update_main_dataframe()
         
         return self
     
     def _save_preprocessing_results(self):
-        """Save preprocessing results to data/clean/ directory."""
+        """Save only essential preprocessing results to data/clean/ directory."""
         if not hasattr(self, 'data_loader') or not self.data_loader:
             self.logger.warning("No data loader available - cannot save preprocessing results")
             return
             
         clean_dir = self.data_loader.dataset_dirs["clean"]
         
-        # Save vocabulary dictionary
+        # Save only the vocabulary dictionary (essential for reproducibility)
         dict_path = os.path.join(clean_dir, 'id2word.pkl')
         write_pickle(dict_path, self.vocabulary)
         self.logger.info(f"Saved vocabulary dictionary with {len(self.vocabulary)} terms to id2word.pkl")
         
-        # Save preprocessed corpus
-        corpus_path = os.path.join(clean_dir, 'preprocessed_corpus.pkl')
-        write_pickle(corpus_path, self.preprocessed_corpus)
-        self.logger.info("Saved preprocessed corpus to preprocessed_corpus.pkl")
-        
-        # Save BOW corpus
-        bow_path = os.path.join(clean_dir, 'bow_corpus.pkl')
-        write_pickle(bow_path, self.bow_corpus)
-        self.logger.info("Saved bag-of-words corpus to bow_corpus.pkl")
-        
-        # Save preprocessing statistics to experiment directory
-        stats_path = os.path.join(self.experiment_directory, 'preprocessing_stats.json')
-        with open(stats_path, 'w') as f:
-            json.dump(self.text_preprocessor.get_stats_log(), f, indent=2)
-        self.logger.info(f"Saved preprocessing statistics to {stats_path}")
+        # Note: Removed unnecessary files:
+        # - preprocessed_corpus.pkl (can be regenerated from main_df + vocab)
+        # - bow_corpus.pkl (can be regenerated from preprocessed corpus + vocab)
+        # - preprocessing_stats.json (now tracked in experiment_params.json)
     
     
     # ========================================================================================
