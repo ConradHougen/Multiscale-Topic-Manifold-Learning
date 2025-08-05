@@ -53,6 +53,15 @@ class MainDataSchema(Enum):
     )
     AUTHOR_IDS = FieldDef("author_ids", lambda entry: None, list)
     PREPROCESSED_TEXT = FieldDef("preprocessed_text", lambda entry: None, list)
+    CATEGORIES = FieldDef(
+        "categories", 
+        lambda entry: (
+            entry.get("categories", "").split() if isinstance(entry.get("categories"), str) and entry.get("categories") else
+            entry.get("categories", []) if isinstance(entry.get("categories"), list) else
+            []
+        ), 
+        list
+    )
 
     @property
     def colname(self):

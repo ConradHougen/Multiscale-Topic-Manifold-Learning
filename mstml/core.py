@@ -1388,8 +1388,18 @@ class MstmlOrchestrator:
         initial_count = len(self.documents_df)
         self.logger.info(f"Applying filters to {initial_count} documents")
         
-        # Build filter configuration
+        # Build filter configuration - start with stored filters
         filters = {}
+        
+        # First, check for filters stored from configure_data_filters()
+        if self._pending_data_filters:
+            filters.update(self._pending_data_filters)
+            self.logger.info(f"Using pending filters: {list(self._pending_data_filters.keys())}")
+        elif self._data_loader and hasattr(self._data_loader, 'data_filters') and self._data_loader.data_filters:
+            filters.update(self._data_loader.data_filters)
+            self.logger.info(f"Using DataLoader filters: {list(self._data_loader.data_filters.keys())}")
+        
+        # Then, add any additional filters passed as parameters (these take precedence)
         if date_range:
             filters['date_range'] = self._normalize_date_range(date_range)
         if categories:
@@ -1398,14 +1408,25 @@ class MstmlOrchestrator:
             filters['custom'] = {'function': custom_filter}
         filters.update(kwargs)
         
+        if not filters:
+            self.logger.warning("No filters configured. Call configure_data_filters() first or pass filter parameters.")
+            return self
+        
         # Apply each filter and report results
         current_df = self.documents_df.copy()
         
+        self.logger.info(f"Applying filters: {list(filters.keys())}")
+        
         for filter_name, filter_config in filters.items():
             pre_filter_count = len(current_df)
+            self.logger.info(f"Applying filter '{filter_name}' with config: {filter_config}")
             
             if hasattr(self.data_loader, '_apply_single_filter'):
-                current_df = self.data_loader._apply_single_filter(filter_name, filter_config, current_df)
+                try:
+                    current_df = self.data_loader._apply_single_filter(filter_name, filter_config, current_df)
+                except Exception as e:
+                    self.logger.error(f"Filter '{filter_name}' failed: {e}")
+                    continue
             else:
                 self.logger.warning(f"Filter '{filter_name}' not supported by current DataLoader")
                 continue
@@ -1414,6 +1435,14 @@ class MstmlOrchestrator:
             removed_count = pre_filter_count - post_filter_count
             
             self.logger.info(f"Filter '{filter_name}': {post_filter_count}/{pre_filter_count} documents retained ({removed_count} removed)")
+            
+            # Debug: Show sample data after filtering
+            if post_filter_count > 0 and filter_name == 'categories':
+                sample_categories = current_df['categories'].iloc[0] if 'categories' in current_df.columns else 'N/A'
+                self.logger.debug(f"Sample categories after filter: {sample_categories}")
+            elif post_filter_count > 0 and filter_name == 'date_range':
+                sample_date = current_df['date'].iloc[0] if 'date' in current_df.columns else 'N/A'
+                self.logger.debug(f"Sample date after filter: {sample_date}")
         
         # Update the main dataframe
         self.documents_df = current_df
@@ -1421,6 +1450,10 @@ class MstmlOrchestrator:
         total_removed = initial_count - final_count
         
         self.logger.info(f"Total filtering result: {final_count}/{initial_count} documents retained ({total_removed} removed)")
+        
+        # Clear pending filters since they've been applied
+        if self._pending_data_filters:
+            self._pending_data_filters = None
         
         return self
     

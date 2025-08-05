@@ -364,10 +364,10 @@ class DataLoader(ABC):
         schema_fields = MainDataSchema.all_fields()
 
         # Only validate fields that should be populated at raw data stage
-        # Skip author_ids and preprocessed_text as they're populated later
+        # Skip author_ids, preprocessed_text, and categories as they're optional or populated later
         required_cols = [
             field.colname for field in schema_fields 
-            if field.colname not in ['author_ids', 'preprocessed_text']
+            if field.colname not in ['author_ids', 'preprocessed_text', 'categories']
         ]
         col_type_map = {field.colname: field.value.type for field in schema_fields}
 
@@ -396,7 +396,7 @@ class DataLoader(ABC):
 
         type_mask = non_null_mask.copy()
         for col, expected_type in col_type_map.items():
-            if col not in ['author_ids', 'preprocessed_text']:  # Skip later-populated fields
+            if col not in ['author_ids', 'preprocessed_text', 'categories']:  # Skip optional/later-populated fields
                 try:
                     result = check_type(self.df[col], expected_type)
                     if isinstance(result, bool):
@@ -560,23 +560,63 @@ class DataLoader(ABC):
         if not target_categories:
             log_print("No target categories specified, skipping categories filter", level="warning")
             return df
-        
+
+        # Convert target_categories to a set for fast lookup
+        target_categories = set(target_categories)
+
         if column not in df.columns:
             log_print(f"Categories column '{column}' not found, skipping categories filter", level="warning")
             return df
         
         log_print(f"   Categories filter: looking for {target_categories} in column '{column}'", level="debug")
         
-        # Apply the category filter (similar to your original implementation)
-        def check_categories(cat_value):
-            if pd.isna(cat_value) or not cat_value:
-                return False
-            # Convert to string and check if any target category is in the value
-            cat_str = str(cat_value)
-            return any(cat in cat_str for cat in target_categories)
+        # Debug: Check sample category values and types
+        sample_values = df[column].head().tolist()
+        log_print(f"   Sample category values: {sample_values}", level="debug")
+        log_print(f"   Sample category types: {[type(v).__name__ for v in sample_values]}", level="debug")
         
-        cat_mask = df[column].apply(check_categories)
-        return df[cat_mask].copy()
+        # Apply the category filter - handle both list and string formats
+        def check_categories(cat_value):
+            try:
+                # Step 1: Handle missing or null entries
+                if cat_value is None:
+                    return False
+                if isinstance(cat_value, float) and pd.isna(cat_value):
+                    return False
+
+                # Step 2: Normalize to set of strings
+                if isinstance(cat_value, str):
+                    # Split comma- or space-separated string
+                    cat_set = set(cat_value.replace(',', ' ').split())
+
+                elif hasattr(cat_value, '__iter__') and not isinstance(cat_value, (str, bytes)):
+                    # Iterable (list, array, etc.) — iterate element-wise and test for scalar nulls
+                    cat_set = set(
+                        str(x).strip() for x in cat_value
+                        if x is not None and not (isinstance(x, float) and pd.isna(x)) and str(x).strip()
+                    )
+
+                else:
+                    # Fallback: single stringable value
+                    cat_set = set(str(cat_value).split())
+
+                # Step 3: Check for overlap with target categories
+                return bool(cat_set & target_categories)
+
+            except Exception as e:
+                print(f"Error on value {cat_value}: {e}")
+                return False
+
+        # Apply the filter with proper error handling
+        try:
+            cat_mask = df[column].apply(check_categories)
+            filtered_df = df[cat_mask].copy()
+            log_print(f"   Categories filter applied: {len(filtered_df)}/{len(df)} rows retained", level="debug")
+            return filtered_df
+        except Exception as e:
+            log_print(f"Categories filter failed during apply: {e}", level="error")
+            log_print(f"Sample category values: {df[column].head().tolist()}", level="debug")
+            return df
     
     def _apply_custom_filter(self, custom_config: Dict, df: pd.DataFrame) -> pd.DataFrame:
         """
