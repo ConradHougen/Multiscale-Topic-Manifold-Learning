@@ -185,3 +185,6 @@ mstml/fast_encode_tree/*.pyd
 
 # Backup code
 .backup/
+
+# Remove experiments directory from tracking
+experiments/
