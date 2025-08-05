@@ -1,4 +1,4 @@
-# Multi-Scale Topic Manifold Learning (MSTML)
+# Multiscale Topic Manifold Learning (MSTML)
 
 This is the public release version of the code and examples related to the papers: "Multi-Scale Topic Manifold Learning for Understanding Interdisciplinary Collaborations in Co-Author Networks" and "A Multiscale Geometric Method for Capturing Relational Topic Alignment".
 
