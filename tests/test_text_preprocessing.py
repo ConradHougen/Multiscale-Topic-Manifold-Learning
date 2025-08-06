@@ -163,13 +163,15 @@ class TestTextPreprocessorBasicMethods:
     
     def test_preprocess_raw_text(self, processor, sample_df):
         """Test preprocess_raw_text method"""
-        result_df = processor.preprocess_raw_text(sample_df, text_column='text')
+        from mstml.dataframe_schema import MainDataSchema
         
-        # Check that text_processed column was added
-        assert 'text_processed' in result_df.columns
+        result_df = processor.preprocess_raw_text(sample_df, text_column='text', target_column=MainDataSchema.PREPROCESSED_TEXT.colname)
+        
+        # Check that preprocessed_text column was added
+        assert MainDataSchema.PREPROCESSED_TEXT.colname in result_df.columns
         
         # Check that text was properly preprocessed
-        first_processed = result_df.iloc[0]['text_processed']
+        first_processed = result_df.iloc[0][MainDataSchema.PREPROCESSED_TEXT.colname]
         assert isinstance(first_processed, list)
         assert 'this' in first_processed
         assert 'machine' in first_processed
@@ -324,8 +326,10 @@ class TestTextPreprocessorUtilityMethods:
     
     def test_drop_empty_rows(self, processor):
         """Test drop_empty_rows method"""
+        from mstml.dataframe_schema import MainDataSchema
+        
         df = pd.DataFrame({
-            'text_processed': [
+            MainDataSchema.PREPROCESSED_TEXT.colname: [
                 ['word1', 'word2'],
                 [],  # Empty list
                 ['word3'],
@@ -335,7 +339,7 @@ class TestTextPreprocessorUtilityMethods:
             'other_col': [1, 2, 3, 4, 5]
         })
         
-        result_df = processor.drop_empty_rows(df)
+        result_df = processor.drop_empty_rows(df, MainDataSchema.PREPROCESSED_TEXT.colname)
         
         # Should only keep rows with non-empty lists
         assert len(result_df) == 3

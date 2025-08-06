@@ -19,6 +19,7 @@ from typing import List, Dict, Optional
 from multiprocessing import Pool
 from tqdm import tqdm
 from ._file_driver import log_print
+from .dataframe_schema import MainDataSchema
 
 
 def super_simple_preprocess(text):
@@ -53,8 +54,8 @@ class TextPreprocessor:
         return df[df['categories'].apply(lambda x: any(cat in x for cat in allowed_categories))]
 
     ### === STEP 2: Basic Preprocessing === ###
-    def preprocess_raw_text(self, df, text_column='text'):
-        df['text_processed'] = df[text_column].map(super_simple_preprocess)
+    def preprocess_raw_text(self, df, text_column='text', target_column='preprocessed_text'):
+        df[target_column] = df[text_column].map(super_simple_preprocess)
         return df
 
     def lemmatize_all(self, docs):
@@ -181,7 +182,7 @@ class TextPreprocessor:
         self.stats_log['vocab_final'] = len(self.id2word)
 
     ### === STEP 5: Accessors and Utilities === ###
-    def drop_empty_rows(self, df, text_col='text_processed'):
+    def drop_empty_rows(self, df, text_col='preprocessed_text'):
         return df[df[text_col].map(lambda x: isinstance(x, list) and len(x) > 0)].reset_index(drop=True)
 
     def get_dictionary(self):
@@ -246,10 +247,10 @@ class TextPreprocessor:
         ### === STEP 2: Basic Preprocessing === ###
         # Preprocess raw text (tokenization) - modifies df in place
         log_print("Tokenizing documents", level="info")
-        df = self.preprocess_raw_text(df, text_column)
+        df = self.preprocess_raw_text(df, text_column, MainDataSchema.PREPROCESSED_TEXT.colname)
         
         # Extract tokenized documents for further processing
-        tokenized_docs = df['text_processed'].tolist()
+        tokenized_docs = df[MainDataSchema.PREPROCESSED_TEXT.colname].tolist()
         
         # Apply lemmatization in parallel
         log_print("Applying lemmatization using multiprocessing", level="info")
@@ -288,11 +289,11 @@ class TextPreprocessor:
         ### === STEP 5: Final Cleanup === ###
         log_print("Performing final cleanup and dictionary rebuild", level="info")
         # Create temporary dataframe with processed text for dropping empty rows
-        temp_df = pd.DataFrame({'text_processed': self.filtered_docs})
-        temp_df = self.drop_empty_rows(temp_df, 'text_processed')
+        temp_df = pd.DataFrame({MainDataSchema.PREPROCESSED_TEXT.colname: self.filtered_docs})
+        temp_df = self.drop_empty_rows(temp_df, MainDataSchema.PREPROCESSED_TEXT.colname)
         
         # Update filtered docs to only include non-empty documents
-        self.filtered_docs = temp_df['text_processed'].tolist()
+        self.filtered_docs = temp_df[MainDataSchema.PREPROCESSED_TEXT.colname].tolist()
         
         # Rebuild dictionary one final time
         self.id2word = corpora.Dictionary(self.filtered_docs)

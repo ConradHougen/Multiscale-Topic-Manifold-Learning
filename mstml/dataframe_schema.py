@@ -38,14 +38,20 @@ class MainDataSchema(Enum):
         lambda entry: (
             [] if entry.get("authors") is None else
             # Handle list of [first, last] pairs (ArXiv authors_parsed format)
-            [str.upper(str.strip(f"{auth[1]}, {auth[0]}")) for auth in entry.get("authors", [])
+            # Convert to nested list: [["LAST, FIRST"], ["LAST, FIRST"], ...]
+            [[str.upper(str.strip(f"{auth[1]}, {auth[0]}"))] for auth in entry.get("authors", [])
              if isinstance(auth, (list, tuple)) and len(auth) >= 2] if
             isinstance(entry.get("authors"), list) and len(entry.get("authors", [])) > 0 and isinstance(entry.get("authors")[0], (list, tuple)) else
-            # Handle comma-separated string format
-            [str.upper(str.strip(author)) for author in str(entry.get("authors", "")).split(",")
-             if author and str.strip(author)] if isinstance(entry.get("authors"), str) else
-            # Handle already processed list of strings
-            [str.upper(str.strip(str(auth))) for auth in entry.get("authors", [])
+            
+            # Handle semicolon-separated string format: "LAST, FIRST; LAST2, FIRST2"
+            [[str.upper(str.strip(author))] for author in str(entry.get("authors", "")).split(";")
+             if author.strip()] if isinstance(entry.get("authors"), str) and ";" in str(entry.get("authors", "")) else
+            
+            # Handle comma-separated string format (single author)
+            [[str.upper(str.strip(str(entry.get("authors", ""))))]] if isinstance(entry.get("authors"), str) and entry.get("authors", "").strip() else
+            
+            # Handle flat list of strings (legacy format) - treat each as single author
+            [[str.upper(str.strip(str(auth)))] for auth in entry.get("authors", [])
              if auth and str(auth).strip()] if isinstance(entry.get("authors"), list) else
             []
         ),

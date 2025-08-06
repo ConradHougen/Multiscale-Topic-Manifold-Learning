@@ -96,12 +96,14 @@ class TermRelevanceTopicFilter:
 # ============================================================================
 
 def preprocess_documents(chunks):
-    """Function that extracts 'text_processed' column per doc chunk"""
+    """Function that extracts 'preprocessed_text' column per doc chunk"""
+    from .dataframe_schema import MainDataSchema
+    
     preprocessed_chunks = []
     for chunk_df in chunks:
         preprocessed_docs = {}
         for doc_id in chunk_df.index:
-            preprocessed_docs[doc_id] = chunk_df.loc[doc_id, 'text_processed']
+            preprocessed_docs[doc_id] = chunk_df.loc[doc_id, MainDataSchema.PREPROCESSED_TEXT.colname]
         preprocessed_chunks.append(preprocessed_docs)
     return preprocessed_chunks
 

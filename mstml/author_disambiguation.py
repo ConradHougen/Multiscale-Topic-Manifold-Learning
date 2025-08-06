@@ -170,6 +170,7 @@ class AuthorDisambiguator:
             available_ids = len(self._id_pool) - self._pool_index
             
         log_print(f"Pool has {available_ids} available IDs for estimated need of {estimated_ids_needed}", level="debug")
+    
 
     def update_dataframe(self, df: pd.DataFrame, author_names_column: str) -> pd.Series:
         """
@@ -199,16 +200,33 @@ class AuthorDisambiguator:
             self._sync_with_dataframe_ids(df, author_ids_column)
             
         try:
-            # Extract all author names from the dataframe
+            # Extract all author names from the dataframe (nested format: list of lists of strings)
             all_author_lists = df[author_names_column].tolist()
         except Exception as e:
             raise RuntimeError(f"Failed to extract author lists from DataFrame: {e}")
+        
+        # Flatten nested author lists to flat lists for processing
+        flattened_author_lists = []
+        for doc_authors in all_author_lists:
+            if doc_authors is None:
+                flattened_author_lists.append([])
+            elif isinstance(doc_authors, list):
+                # Flatten nested list: [["NAME1"], ["NAME2"]] -> ["NAME1", "NAME2"]
+                flat_authors = []
+                for author_group in doc_authors:
+                    if isinstance(author_group, list):
+                        flat_authors.extend(author_group)
+                    else:
+                        flat_authors.append(str(author_group))
+                flattened_author_lists.append(flat_authors)
+            else:
+                flattened_author_lists.append([])
         
         # Filter out documents with too many authors
         valid_indices = []
         filtered_author_lists = []
         
-        for idx, authors in enumerate(all_author_lists):
+        for idx, authors in enumerate(flattened_author_lists):
             # Handle None or non-list authors
             if authors is None:
                 authors = []
@@ -233,14 +251,14 @@ class AuthorDisambiguator:
             else:
                 self.fit(filtered_author_lists)
         
-        # Generate author IDs for each document
+        # Generate author IDs for each document (return as flat lists)
         result_series = pd.Series([[] for _ in range(len(df))], index=df.index)
         
         for result_idx, orig_idx in enumerate(valid_indices):
-            authors = all_author_lists[orig_idx]
-            author_ids = self._get_author_ids_for_document(authors)
+            flattened_authors = flattened_author_lists[orig_idx]
+            author_ids = self._get_author_ids_for_document(flattened_authors)
             result_series.iloc[orig_idx] = author_ids
-            
+        
         return result_series
     
     def fit(self, author_lists: List[List[str]]) -> 'AuthorDisambiguator':
