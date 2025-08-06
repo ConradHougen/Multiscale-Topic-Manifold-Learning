@@ -34,7 +34,7 @@ setup(
     name="mstml",
     version="1.0.0",
     author="MSTML Research Team",
-    description="Multi-Scale Topic Manifold Learning Framework",
+    description="Multiscale Topic Manifold Learning Framework",
     packages=find_packages(),
     include_package_data=True,
     ext_modules=cythonize(extensions, compiler_directives={"language_level": "3"}),

@@ -1,6 +1,6 @@
 # Multiscale Topic Manifold Learning (MSTML)
 
-This is the public release version of the code and examples related to the papers: "Multi-Scale Topic Manifold Learning for Understanding Interdisciplinary Collaborations in Co-Author Networks" and "A Multiscale Geometric Method for Capturing Relational Topic Alignment".
+This is the public release version of the code and examples related to the papers: "Multiscale Topic Manifold Learning for Understanding Interdisciplinary Collaborations in Co-Author Networks" and "A Multiscale Geometric Method for Capturing Relational Topic Alignment".
 
 ## Overview
 
@@ -17,8 +17,8 @@ MSTML uses a custom build system that automatically handles dependencies, compil
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-repo/Multi-Scale-Topic-Manifold-Learning.git
-cd Multi-Scale-Topic-Manifold-Learning
+git clone https://github.com/your-repo/Multiscale-Topic-Manifold-Learning.git
+cd Multiscale-Topic-Manifold-Learning
 
 # Run the automated build and installation
 python build.py

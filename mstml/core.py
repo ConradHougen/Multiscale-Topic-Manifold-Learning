@@ -1,5 +1,5 @@
 """
-Core MSTML (Multi-Scale Topic Manifold Learning) functionality.
+Core MSTML (Multiscale Topic Manifold Learning) functionality.
 
 This module provides user-friendly interfaces and integration points for the MSTML framework,
 combining temporal topic modeling (GDLTM), network analysis, and hierarchical modeling.

@@ -31,7 +31,7 @@ class TestUtilityFunctions:
         root_dir = get_project_root_directory()
         assert isinstance(root_dir, Path)
         assert root_dir.exists()
-        assert root_dir.name == "Multi-Scale-Topic-Manifold-Learning"
+        assert root_dir.name == "Multiscale-Topic-Manifold-Learning"
     
     def test_get_data_directory(self):
         """Test get_data_directory returns correct path"""

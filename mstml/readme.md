@@ -1,6 +1,6 @@
 # MSTML Package Documentation
 
-This document provides a comprehensive overview of all classes, methods, and functions in the Multi-Scale Topic Manifold Learning (MSTML) package.
+This document provides a comprehensive overview of all classes, methods, and functions in the Multiscale Topic Manifold Learning (MSTML) package.
 
 ## Package Architecture
 

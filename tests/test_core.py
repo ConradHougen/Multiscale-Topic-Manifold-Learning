@@ -23,7 +23,7 @@ class TestCoreModule:
     def test_core_module_docstring(self):
         """Test that core module has proper documentation"""
         assert core.__doc__ is not None
-        assert "Multi-Scale Topic Manifold Learning" in core.__doc__
+        assert "Multiscale Topic Manifold Learning" in core.__doc__
         assert "MSTML" in core.__doc__
     
     def test_core_module_structure(self):
