@@ -14,7 +14,7 @@ import hypernetx as hnx
 import pandas as pd
 import numpy as np
 import community as community_louvain  # For Louvain method
-from collections import Counter
+from collections import Counter, defaultdict
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 from pathlib import Path
 from ._file_driver import get_data_int_dir
@@ -38,9 +38,6 @@ def build_coauthor_network_from_dataframe(df, author_names_col, author_ids_col=N
     Returns:
         NetworkX Graph with co-author network
     """
-    import networkx as nx
-    from collections import defaultdict
-    
     # Initialize network
     G = nx.Graph()
     collaboration_counts = defaultdict(int)
@@ -79,7 +76,7 @@ def build_coauthor_network_from_dataframe(df, author_names_col, author_ids_col=N
     # Add edges for collaborations meeting threshold
     for (author1, author2), count in collaboration_counts.items():
         if count >= min_collaborations:
-            G.add_edge(author1, author2, weight=count, collaborations=count)
+            G.add_edge(author1, author2)
     
     # Remove self-loops if any exist (following original pattern)
     G.remove_edges_from(nx.selfloop_edges(G))

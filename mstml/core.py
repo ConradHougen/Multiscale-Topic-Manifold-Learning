@@ -59,7 +59,7 @@ from ._topic_model_driver import *
 # Additional imports for methods
 import pickle
 from datetime import datetime
-from gensim.models import LdaModel, CoherenceModel
+from gensim.models import LdaModel, LdaMulticore, CoherenceModel
 from gensim.corpora import Dictionary
 from scipy.spatial.distance import pdist, squareform
 from scipy.cluster.hierarchy import linkage, dendrogram
@@ -1695,7 +1695,7 @@ class MstmlOrchestrator:
             
             # Save single network
             dataset_name = getattr(self.data_loader, '_dataset_name', 'unknown')
-            networks_dir = self.data_loader.dataset_dirs["clean"].replace("/clean", "/networks")
+            networks_dir = self.data_loader.dataset_dirs["networks"]
             os.makedirs(networks_dir, exist_ok=True)
             
             network_filename = f"{dataset_name}_coauthor_network.graphml"
@@ -1873,7 +1873,7 @@ class MstmlOrchestrator:
         df['date'] = pd.to_datetime(df['date'])
         
         # Group by the specified interval and create chunks
-        chunks = [group for _, group in df.groupby(pd.Grouper(key='date', freq=f'{months_per_chunk}M'))]
+        chunks = [group for _, group in df.groupby(pd.Grouper(key='date', freq=f'{months_per_chunk}ME'))]
         
         # Convert to the expected format
         self.time_chunks = []
@@ -2067,15 +2067,17 @@ class MstmlOrchestrator:
         return self
     
     def train_ensemble_models(self,
-                            base_model: str = 'LDA',
-                            topics_per_chunk: Optional[int] = None,
-                            model_params: Optional[dict] = None) -> 'MstmlOrchestrator':
+                              base_model: str = 'LDA',
+                              topics_per_chunk: Optional[int] = None,
+                              docs_per_topic: int = 25,
+                              model_params: Optional[dict] = None) -> 'MstmlOrchestrator':
         """
         Train ensemble of topic models on temporal chunks.
         
         Args:
             base_model: Base topic model type ('LDA', 'T-LDA', etc.)
-            topics_per_chunk: Number of topics per chunk model
+            topics_per_chunk: Number of topics per chunk model (overrides automatic calculation)
+            docs_per_topic: Target number of documents per topic for automatic calculation
             model_params: Additional model parameters
         
         Returns:
@@ -2101,14 +2103,34 @@ class MstmlOrchestrator:
             chunk_doc_indices = chunk_info['document_indices']
             chunk_size = len(chunk_doc_indices)
             
-            # Create chunk-specific corpus
-            chunk_corpus = [self.preprocessed_corpus[idx] for idx in chunk_doc_indices]
+            # Create chunk-specific BOW corpus for LDA training
+            # Map original dataframe indices to preprocessed corpus indices
+            valid_indices = []
+            chunk_bow_corpus = []
+            for original_idx in chunk_doc_indices:
+                try:
+                    # Find the position of this document in the current dataframe
+                    if original_idx in self.documents_df.index:
+                        # Get the position in the current dataframe (which corresponds to bow_corpus index)
+                        corpus_idx = self.documents_df.index.get_loc(original_idx)
+                        if corpus_idx < len(self.bow_corpus):
+                            chunk_bow_corpus.append(self.bow_corpus[corpus_idx])
+                            valid_indices.append(original_idx)
+                except (KeyError, IndexError) as e:
+                    self.logger.warning(f"Skipping document at index {original_idx}: {e}")
+            
+            if not chunk_bow_corpus:
+                self.logger.warning(f"No valid documents found for chunk {chunk_idx + 1}")
+                continue
+            
+            # Update chunk size to reflect actual valid documents
+            chunk_size = len(chunk_bow_corpus)
             
             # Determine number of topics for this chunk
             if topics_per_chunk is None:
-                # Scale K as affine function of documents per chunk
-                # Heuristic: K = max(5, min(50, chunk_size // 10))
-                k_topics = max(5, min(50, chunk_size // 10))
+                # Use original affine function: minimum of 4 topics per chunk, 
+                # unless the chunk has fewer than 4 documents
+                k_topics = max(min(4, chunk_size), chunk_size // docs_per_topic)
             else:
                 k_topics = topics_per_chunk
             
@@ -2118,31 +2140,51 @@ class MstmlOrchestrator:
             )
             
             if base_model.upper() == 'LDA':
-                # Train LDA model for this chunk
-                lda_params = {
-                    'corpus': chunk_corpus,
-                    'id2word': self.vocabulary,
-                    'num_topics': k_topics,
-                    'random_state': 42,
-                    'passes': model_params.get('passes', 10),
-                    'iterations': model_params.get('iterations', 50),
-                    'alpha': model_params.get('alpha', 'auto'),
-                    'eta': model_params.get('eta', 'auto')
-                }
+                # Get alpha and eta parameters
+                alpha_param = model_params.get('alpha', 'auto')
+                eta_param = model_params.get('eta', 'auto')
                 
-                chunk_model = LdaModel(**lda_params)
+                # Use LdaModel for auto-tuning, LdaMulticore otherwise
+                if alpha_param == 'auto' or eta_param == 'auto':
+                    self.logger.info("Using LdaModel for auto-tuning alpha/eta parameters")
+                    chunk_model = LdaModel(
+                        corpus=chunk_bow_corpus,
+                        id2word=self.vocabulary,
+                        num_topics=k_topics,
+                        passes=model_params.get('passes', 10),
+                        iterations=model_params.get('iterations', 50),
+                        random_state=42,
+                        alpha=alpha_param,
+                        eta=eta_param
+                    )
+                else:
+                    # Use faster LdaMulticore when not using auto-tuning
+                    chunk_model = LdaMulticore(
+                        corpus=chunk_bow_corpus,
+                        id2word=self.vocabulary,
+                        num_topics=k_topics,
+                        passes=model_params.get('passes', 10),
+                        iterations=model_params.get('iterations', 50),
+                        random_state=42,
+                        alpha=alpha_param,
+                        eta=eta_param
+                    )
                 
                 # Extract topic-word distributions φ(k)
                 topic_word_distributions = chunk_model.get_topics()  # Shape: (num_topics, vocab_size)
                 
                 # Extract document-topic distributions for this chunk
                 doc_topic_distributions = []
-                for doc_bow in chunk_corpus:
+                for doc_bow in chunk_bow_corpus:
                     doc_topics = chunk_model.get_document_topics(doc_bow, minimum_probability=0.0)
                     doc_topic_array = np.zeros(k_topics)
                     for topic_id, prob in doc_topics:
                         doc_topic_array[topic_id] = prob
                     doc_topic_distributions.append(doc_topic_array)
+                
+                # Calculate perplexity metrics
+                log_perplexity = chunk_model.log_perplexity(chunk_bow_corpus)
+                actual_perplexity = np.exp(-1.0 * log_perplexity)
                 
                 chunk_model_info = {
                     'model': chunk_model,
@@ -2153,7 +2195,8 @@ class MstmlOrchestrator:
                     'topic_word_distributions': topic_word_distributions,
                     'document_topic_distributions': np.array(doc_topic_distributions),
                     'document_indices': chunk_doc_indices,
-                    'perplexity': chunk_model.log_perplexity(chunk_corpus),
+                    'log_perplexity': log_perplexity,  # Gensim's log perplexity (negative value, closer to 0 is better)
+                    'perplexity': actual_perplexity,   # Converted perplexity (positive value, lower is better)
                     'coherence': None  # Can be computed later if needed
                 }
                 
@@ -2178,11 +2221,14 @@ class MstmlOrchestrator:
         self.topic_vectors = np.array([topic['vector'] for topic in self.chunk_topics])
         
         total_topics = len(self.chunk_topics)
+        avg_log_perplexity = np.mean([model['log_perplexity'] for model in self.chunk_topic_models])
         avg_perplexity = np.mean([model['perplexity'] for model in self.chunk_topic_models])
         
         self.logger.info(
             f"Ensemble training complete: {len(self.chunk_topic_models)} models, "
-            f"{total_topics} total topics, average perplexity: {avg_perplexity:.2f}"
+            f"{total_topics} total topics, "
+            f"average log-perplexity: {avg_log_perplexity:.2f} (closer to 0 is better), "
+            f"average perplexity: {avg_perplexity:.2f} (lower is better)"
         )
         
         return self
@@ -2842,7 +2888,8 @@ class MstmlOrchestrator:
     # 6. LONGITUDINAL ANALYSIS AND VISUALIZATION
     # ========================================================================================
     
-    def create_phate_embedding(self,
+    def create_topic_embedding(self,
+                             method: str = 'phate',
                              n_components: int = 2,
                              knn_neighbors: int = 5,
                              gamma: float = 1.0,
@@ -2850,22 +2897,28 @@ class MstmlOrchestrator:
                              color_by: str = 'time',
                              show_colorbar: bool = True,
                              interactive: bool = False,
-                             figure_size: tuple = (10, 8)) -> 'MstmlOrchestrator':
+                             figure_size: tuple = (10, 8),
+                             cut_height: Optional[float] = None,
+                             **method_kwargs) -> 'MstmlOrchestrator':
         """
-        Create PHATE embedding for topic trajectory visualization.
+        Create topic space embedding for visualization based on dendrogram cut height.
         
+        Supports multiple embedding methods including PHATE, PCA, UMAP, and t-SNE.
         PHATE preserves local and global distances through density-adaptive
         diffusion process, ideal for visualizing topic drift over time.
         
         Args:
+            method: Embedding method ('phate', 'pca', 'umap', 'tsne')
             n_components: Number of embedding dimensions
-            knn_neighbors: Number of nearest neighbors for PHATE
+            knn_neighbors: Number of nearest neighbors for PHATE/UMAP
             gamma: PHATE gamma parameter for kernel bandwidth
-            t: Number of diffusion steps
+            t: Number of diffusion steps for PHATE
             color_by: Color coding scheme ('time', 'meta_topic', 'none')
             show_colorbar: Whether to display colorbar
             interactive: Whether to create interactive plot (plotly vs matplotlib)
             figure_size: Figure size as (width, height) tuple
+            cut_height: Dendrogram cut height for meta-topic clustering
+            **method_kwargs: Additional parameters for specific embedding methods
         
         Returns:
             Self for method chaining
@@ -2874,52 +2927,92 @@ class MstmlOrchestrator:
         if self.topic_vectors is None:
             raise ValueError("No topic vectors available. Call build_topic_manifold() first.")
         
-        self.logger.info(f"Creating {n_components}D PHATE embedding with {color_by} coloring")
-        
-        # Check if PHATE is available, fall back to PCA if not
-        if PHATE_AVAILABLE:
-            use_phate = True
-        else:
-            self.logger.warning("PHATE not available, falling back to PCA")
-            use_phate = False
+        self.logger.info(f"Creating {n_components}D {method.upper()} embedding with {color_by} coloring")
         
         # Convert topic vectors to numpy array
         topic_matrix = np.array(self.topic_vectors)
         
-        if use_phate:
-            # Compute Hellinger distance matrix
-            n_topics = len(self.topic_vectors)
-            distance_matrix = np.zeros((n_topics, n_topics))
-            
-            for i in range(n_topics):
-                for j in range(i+1, n_topics):
-                    dist = hellinger(topic_matrix[i], topic_matrix[j])
-                    distance_matrix[i, j] = dist
-                    distance_matrix[j, i] = dist
-            
-            # Create PHATE operator with precomputed distance
-            phate_op = phate.PHATE(
-                n_components=n_components,
-                knn=knn_neighbors,
-                gamma=gamma,
-                t=t,
-                metric='precomputed',
-                random_state=42
-            )
-            
-            # Apply PHATE transformation
-            self.topic_embedding = phate_op.fit_transform(distance_matrix)
-            
-        else:
-            # Fallback to PCA
-            pca = PCA(n_components=n_components, random_state=42)
+        # Apply dendrogram cut height if specified for meta-topic clustering
+        if cut_height is not None and hasattr(self, 'topic_dendrogram_linkage'):
+            from scipy.cluster.hierarchy import fcluster
+            self.topic_cluster_labels = fcluster(self.topic_dendrogram_linkage, 
+                                               cut_height, criterion='distance')
+            self.logger.info(f"Cut dendrogram at height {cut_height}, found {len(np.unique(self.topic_cluster_labels))} meta-topics")
+        
+        # Select and apply embedding method
+        method_lower = method.lower()
+        
+        if method_lower == 'phate':
+            # PHATE embedding with Hellinger distance
+            if not PHATE_AVAILABLE:
+                self.logger.warning("PHATE not available, falling back to PCA")
+                method_lower = 'pca'
+            else:
+                # Compute Hellinger distance matrix
+                n_topics = len(self.topic_vectors)
+                distance_matrix = np.zeros((n_topics, n_topics))
+                
+                for i in range(n_topics):
+                    for j in range(i+1, n_topics):
+                        dist = hellinger(topic_matrix[i], topic_matrix[j])
+                        distance_matrix[i, j] = dist
+                        distance_matrix[j, i] = dist
+                
+                # Create PHATE operator with precomputed distance
+                phate_op = phate.PHATE(
+                    n_components=n_components,
+                    knn=knn_neighbors,
+                    gamma=gamma,
+                    t=t,
+                    metric='precomputed',
+                    random_state=42,
+                    **method_kwargs
+                )
+                
+                self.topic_embedding = phate_op.fit_transform(distance_matrix)
+                
+        if method_lower == 'pca':
+            # PCA embedding
+            pca = PCA(n_components=n_components, random_state=42, **method_kwargs)
             self.topic_embedding = pca.fit_transform(topic_matrix)
-            
             self.logger.info(f"PCA explained variance ratio: {pca.explained_variance_ratio_}")
+            
+        elif method_lower == 'umap':
+            # UMAP embedding
+            try:
+                import umap
+                umap_op = umap.UMAP(
+                    n_components=n_components,
+                    n_neighbors=knn_neighbors,
+                    random_state=42,
+                    **method_kwargs
+                )
+                self.topic_embedding = umap_op.fit_transform(topic_matrix)
+            except ImportError:
+                self.logger.warning("UMAP not available, falling back to PCA")
+                pca = PCA(n_components=n_components, random_state=42)
+                self.topic_embedding = pca.fit_transform(topic_matrix)
+                method_lower = 'pca'
+                
+        elif method_lower == 'tsne':
+            # t-SNE embedding
+            try:
+                from sklearn.manifold import TSNE
+                tsne_op = TSNE(
+                    n_components=n_components,
+                    random_state=42,
+                    **method_kwargs
+                )
+                self.topic_embedding = tsne_op.fit_transform(topic_matrix)
+            except ImportError:
+                self.logger.warning("t-SNE not available, falling back to PCA")
+                pca = PCA(n_components=n_components, random_state=42)
+                self.topic_embedding = pca.fit_transform(topic_matrix)
+                method_lower = 'pca'
         
         # Store embedding parameters
         self.embed_params = {
-            'method': 'PHATE' if use_phate else 'PCA',
+            'method': method_lower.upper(),
             'n_components': n_components,
             'knn_neighbors': knn_neighbors,
             'gamma': gamma,
@@ -2927,7 +3020,9 @@ class MstmlOrchestrator:
             'color_by': color_by,
             'show_colorbar': show_colorbar,
             'interactive': interactive,
-            'figure_size': figure_size
+            'figure_size': figure_size,
+            'cut_height': cut_height,
+            'method_kwargs': method_kwargs
         }
         
         # Create time-based coloring information if requested
@@ -2946,11 +3041,24 @@ class MstmlOrchestrator:
             self.topic_cluster_colors = self.topic_cluster_labels
         
         self.logger.info(
-            f"Created {'PHATE' if use_phate else 'PCA'} embedding: "
+            f"Created {method_lower.upper()} embedding: "
             f"{topic_matrix.shape[0]} topics -> {n_components}D space"
         )
         
         return self
+    
+    def create_phate_embedding(self, **kwargs) -> 'MstmlOrchestrator':
+        """
+        Backward compatibility method for create_phate_embedding.
+        Calls create_topic_embedding with method='phate'.
+        """
+        import warnings
+        warnings.warn(
+            "create_phate_embedding is deprecated. Use create_topic_embedding(method='phate') instead.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        return self.create_topic_embedding(method='phate', **kwargs)
     
     def display_topic_embedding(self,
                               title: Optional[str] = None,
@@ -3289,8 +3397,8 @@ class MstmlOrchestrator:
                 'params': {
                     # LDA-specific parameters (used when type='LDA')
                     'lda': {
-                        'alpha': 'auto',
-                        'eta': 'auto',
+                        'alpha': 'symmetric',
+                        'eta': None,
                         'passes': 10,
                         'iterations': 50,
                         'num_topics': 'auto',

@@ -63,6 +63,14 @@ orchestrator.train_ensemble_models()
 orchestrator.build_topic_manifold()
 orchestrator.compute_author_embeddings()
 
+# Compute interdisciplinarity scores
+orchestrator.compute_interdisciplinarity_scores_docs()
+orchestrator.compute_interdisciplinarity_scores_authors()
+
+# Create and save topic space embedding
+orchestrator.create_topic_embedding(method='phate', cut_height=0.5)
+orchestrator.display_topic_embedding(save_path='topic_embedding.png')
+
 # Save results
 results_path = orchestrator.finalize_experiment()
 print(f"Analysis complete! Results saved to: {results_path}")
@@ -99,6 +107,54 @@ orchestrator.preprocess_text(
     high_frac=0.98,            # Remove common terms (> 98% documents)
     num_topics=80,             # LDA topics for relevancy filtering
     top_n_terms=2500           # Final vocabulary size
+)
+
+# Advanced topic embedding and interdisciplinarity analysis
+orchestrator.build_topic_manifold()
+orchestrator.compute_author_embeddings()
+
+# Compute interdisciplinarity scores with custom parameters
+orchestrator.compute_interdisciplinarity_scores_docs(
+    entropy_weighting=True,
+    author_publication_weighting=True,
+    topn=100  # Get top 100 most interdisciplinary documents
+)
+
+orchestrator.compute_interdisciplinarity_scores_authors(
+    entropy_weighting=True,
+    publication_count_weighting=True,
+    top_topics_threshold=5,    # Consider only top 5 topics per author
+    topn=50                    # Get top 50 most interdisciplinary authors
+)
+
+# Create topic embeddings with different methods
+# PHATE embedding (default, preserves local and global structure)
+orchestrator.create_topic_embedding(
+    method='phate',
+    n_components=2,
+    cut_height=0.5,           # Cut dendrogram to create meta-topics
+    color_by='meta_topic'
+)
+
+# Alternative: UMAP embedding (faster, good for large datasets)
+orchestrator.create_topic_embedding(
+    method='umap',
+    n_components=2,
+    knn_neighbors=15,
+    min_dist=0.1
+)
+
+# Alternative: t-SNE embedding (good for local structure)
+orchestrator.create_topic_embedding(
+    method='tsne',
+    n_components=2,
+    perplexity=30
+)
+
+# Display and save visualizations
+orchestrator.display_topic_embedding(
+    title='Topic Space Embedding - Meta-Topic Clusters',
+    save_path='topic_space_embedding.png'
 )
 ```
 
@@ -150,9 +206,11 @@ Multiscale-Topic-Manifold-Learning/
 
 ### 1. Geometry-Driven Longitudinal Topic Model (GDLTM)
 - Extracts topics from document collections across time slices
-- Uses PHATE embeddings of Hellinger distances between topics
+- Supports multiple embedding methods (PHATE, UMAP, t-SNE, PCA) for topic space visualization
+- Uses Hellinger distances between topics for geometric analysis
 - Discovers topic trajectories using shortest path algorithms
-- Provides hierarchical clustering of topics based on geometric structure
+- Provides hierarchical clustering of topics with dendrogram cut heights for meta-topic creation
+- Computes interdisciplinarity scores for both documents and authors
 
 ### 2. Hierarchical Random Graph (HRG)
 - Fits hierarchical models to network data
