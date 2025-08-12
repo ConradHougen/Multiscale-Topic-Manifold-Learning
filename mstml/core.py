@@ -2069,7 +2069,7 @@ class MstmlOrchestrator:
     def train_ensemble_models(self,
                               base_model: str = 'LDA',
                               topics_per_chunk: Optional[int] = None,
-                              docs_per_topic: int = 25,
+                              docs_per_topic: int = 100,
                               model_params: Optional[dict] = None) -> 'MstmlOrchestrator':
         """
         Train ensemble of topic models on temporal chunks.
@@ -2101,8 +2101,7 @@ class MstmlOrchestrator:
         
         for chunk_idx, chunk_info in enumerate(self.time_chunks):
             chunk_doc_indices = chunk_info['document_indices']
-            chunk_size = len(chunk_doc_indices)
-            
+
             # Create chunk-specific BOW corpus for LDA training
             # Map original dataframe indices to preprocessed corpus indices
             valid_indices = []
@@ -2261,8 +2260,15 @@ class MstmlOrchestrator:
         n_topics = len(self.topic_vectors)
         
         # Use FAISS for large datasets if requested and available
-        if use_faiss and n_topics >= self.config['kNN_params']['faiss_acceleration']['min_vectors_for_faiss']:
+        faiss_succeeded = False
+        faiss_enabled = self.config['kNN_params']['faiss_acceleration']['enabled']
+        min_vectors = self.config['kNN_params']['faiss_acceleration']['min_vectors_for_faiss']
+        
+        if use_faiss and faiss_enabled and n_topics >= min_vectors:
+            self.logger.info(f"Attempting FAISS: use_faiss={use_faiss}, enabled={faiss_enabled}, n_topics={n_topics}, min_vectors={min_vectors}")
             try:
+                if not FAISS_AVAILABLE:
+                    raise ImportError("FAISS not available")
                 
                 self.logger.info(f"Using FAISS for {n_topics} topic vectors")
                 
@@ -2304,13 +2310,15 @@ class MstmlOrchestrator:
                         distance = distances[i, j]
                         self.topic_knn_graph.add_edge(i, neighbor_idx, weight=distance)
                 
-            except ImportError:
-                self.logger.warning("FAISS not available, falling back to scipy")
-                use_faiss = False
+                faiss_succeeded = True
+                
+            except (ImportError, Exception) as e:
+                self.logger.warning(f"FAISS failed ({str(e)}), falling back to scipy")
+                faiss_succeeded = False
         
-        if not use_faiss:
+        if not faiss_succeeded:
             # Use scipy for smaller datasets or when FAISS is not available
-            self.logger.info(f"Using scipy for {n_topics} topic vectors")
+            self.logger.info(f"Using scipy for {n_topics} topic vectors (faiss_succeeded={faiss_succeeded})")
             
             # Compute pairwise distances
             if distance_metric.lower() == 'hellinger':
@@ -2337,6 +2345,10 @@ class MstmlOrchestrator:
                 # Add edges to k nearest neighbors
                 for j, dist in neighbor_distances[:knn_neighbors]:
                     self.topic_knn_graph.add_edge(i, j, weight=dist)
+        
+        # Ensure graph was created successfully
+        if self.topic_knn_graph is None:
+            raise RuntimeError("Failed to create topic k-NN graph. Both FAISS and scipy methods failed.")
         
         # Add metadata to nodes
         for topic_idx, topic_info in enumerate(self.chunk_topics):

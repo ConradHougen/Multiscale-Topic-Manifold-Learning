@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
 MSTML Framework - One-Time Environment Setup and Install
+
+This build script automatically strips ANSI escape sequences from conda output
+while preserving real-time progress display and creating clean log files.
 """
 
 import subprocess
@@ -8,6 +11,7 @@ import sys
 import os
 import argparse
 import logging
+import re
 
 class MstmlBuilder:
     def __init__(self, env_name: str = "mstml"):
@@ -23,6 +27,17 @@ class MstmlBuilder:
             level=logging.INFO,
             format="%(asctime)s - %(levelname)s - %(message)s"
         )
+
+    def _strip_ansi_escape_sequences(self, text: str) -> str:
+        """
+        Remove ANSI escape sequences from text while preserving content.
+        
+        This removes terminal control characters (like cursor movements, colors)
+        that conda uses for progress displays but keeps the actual progress info.
+        """
+        # Pattern to match ANSI escape sequences
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        return ansi_escape.sub('', text)
 
     def _check_conda(self) -> bool:
         try:
@@ -41,17 +56,79 @@ class MstmlBuilder:
         with open(filename, "r") as f:
             return [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
-    def _run(self, cmd: str, desc: str):
+    def _run(self, cmd: str, desc: str, show_progress: bool = True):
         print(f"\n{'='*60}\n{desc}\n{'='*60}")
         logging.info(f"Running: {desc}\nCommand: {cmd}")
+        
+        if show_progress and ("conda create" in cmd or "conda install" in cmd):
+            # For conda commands, show real-time progress while capturing output
+            return self._run_with_progress(cmd, desc)
+        else:
+            # For other commands, use simple capture
+            return self._run_simple(cmd, desc)
+    
+    def _run_simple(self, cmd: str, desc: str):
+        """Run command with simple output capture."""
         try:
             result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
             print("Success")
-            logging.info(result.stdout.strip())
+            
+            # Strip ANSI escape sequences from output before logging
+            clean_stdout = self._strip_ansi_escape_sequences(result.stdout.strip())
+            if clean_stdout:
+                logging.info(clean_stdout)
             return True
         except subprocess.CalledProcessError as e:
             print("Failed:", e.stderr.strip())
-            logging.error(e.stderr.strip())
+            
+            # Strip ANSI escape sequences from error output before logging
+            clean_stderr = self._strip_ansi_escape_sequences(e.stderr.strip())
+            if clean_stderr:
+                logging.error(clean_stderr)
+            return False
+    
+    def _run_with_progress(self, cmd: str, desc: str):
+        """Run command while showing real-time progress and capturing clean logs."""
+        try:
+            # Start the process
+            process = subprocess.Popen(
+                cmd, 
+                shell=True, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT,
+                text=True,
+                universal_newlines=True
+            )
+            
+            output_lines = []
+            # Read output line by line and display progress
+            for line in process.stdout:
+                # Show progress to user (with ANSI sequences for live display)
+                print(line, end='')
+                
+                # Store clean version for logging
+                clean_line = self._strip_ansi_escape_sequences(line.strip())
+                if clean_line:  # Only store non-empty lines
+                    output_lines.append(clean_line)
+            
+            # Wait for process to complete
+            process.wait()
+            
+            if process.returncode == 0:
+                print("\nSuccess")
+                # Log the clean output
+                if output_lines:
+                    logging.info('\n'.join(output_lines))
+                return True
+            else:
+                print(f"\nFailed with return code: {process.returncode}")
+                if output_lines:
+                    logging.error('\n'.join(output_lines))
+                return False
+                
+        except Exception as e:
+            print(f"Failed: {str(e)}")
+            logging.error(f"Command failed: {str(e)}")
             return False
 
     def _create_or_reuse_env(self):
