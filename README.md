@@ -274,6 +274,20 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+## Planned Features
+
+The following features are planned for future releases but are not yet completely implemented:
+
+- **Abstract Manifold Learning Support**: Generalized framework for integrating any manifold learning or low-dimensional embedding technique, with standardized interfaces for custom distance metrics and dimensionality reduction methods beyond the current PHATE, UMAP, t-SNE, and PCA implementations.
+
+- **Interactive Topic Visualization Widgets**: Web-based interactive widgets for labeling, exploring, and displaying topics within embeddings, including real-time clustering, topic annotation tools, and dynamic filtering capabilities for improved topic interpretation and analysis.
+
+- **Link Prediction**: Enhanced algorithms for predicting missing or future collaboration links in co-author networks, incorporating both topological features and semantic similarity from topic distributions to improve prediction accuracy.
+
+- **Hyperlink Prediction in Co-Author Hypergraphs**: Advanced prediction methods for higher-order collaboration patterns in co-author hypergraphs, where hyperedges represent multi-author collaborations, enabling prediction of complex team formation dynamics beyond pairwise relationships.
+
+- **Automated Topic Labeling with LLMs**: Integration of large language models for automated labeling and interpretation of multiscale chunk topic clusters, leveraging contextual understanding to generate meaningful topic names and descriptions from topic-word distributions and representative documents.
+
 ## Contact
 
 For questions or issues, please open an issue on GitHub or contact the authors.

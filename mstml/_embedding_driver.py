@@ -15,6 +15,8 @@ import pandas as pd
 from matplotlib import cm
 from wordcloud import WordCloud
 from scipy.cluster.hierarchy import fcluster
+from ._math_driver import mstml_term_relevance_stable
+from ._file_driver import get_exp_dir, get_data_int_dir, read_pickle
 
 
 # ============================================================================
@@ -240,7 +242,7 @@ def plot_phate_embedding_with_filtered_chunks(exp_dir, cut_height, cluster_label
     filtered_cluster_labels = cluster_labels[filtered_indices]
 
     # Normalize the cluster labels for color mapping
-    cmap = cm.get_cmap('rainbow')
+    cmap = plt.get_cmap('rainbow')
     norm_cluster_labels = (filtered_cluster_labels - min(cluster_labels)) / (max(cluster_labels) - min(cluster_labels))
     colors = cmap(norm_cluster_labels)  # Assign colors based on normalized cluster labels
 
@@ -266,7 +268,7 @@ def plot_phate_embedding_with_filtered_chunks(exp_dir, cut_height, cluster_label
     ax.set_ylim([y_min - margin_y, y_max + margin_y])
 
     # Colorbar based on the full cluster labels range
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=min(cluster_labels), vmax=max(cluster_labels)))
+    sm = cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(vmin=min(cluster_labels), vmax=max(cluster_labels)))
     sm.set_array([])  # Only needed for ScalarMappable
     cbar = plt.colorbar(sm, ax=ax)
 
@@ -401,7 +403,6 @@ def plot_wordcloud_for_topic(word_freq_array, vocab, topic_index, lambda_param=0
     WordCloud
         A WordCloud object for the specified topic, ready for saving or further use.
     """
-    from ._math_driver import mstml_term_relevance_stable  # Import here to avoid circular imports
     
     # Calculate topic-specific word probabilities p(w|z)
     topic_word_freqs = word_freq_array[topic_index]
@@ -455,7 +456,6 @@ def plot_wordcloud_for_topic(word_freq_array, vocab, topic_index, lambda_param=0
 
 def create_and_save_wordcloud(dset, dsub, max_words=200):
     """Function to create wordcloud of entire data, given dataset and subset strings"""
-    from ._file_driver import get_exp_dir, get_data_int_dir, read_pickle  # Import here to avoid circular imports
     
     data_fig_dir = get_exp_dir(dset, dsub)
     int_dir = get_data_int_dir(dset, dsub)
@@ -501,7 +501,6 @@ def convert_slc_tpc_idx_to_yr_and_tpc_idx(slc_tpc_idx, ntop):
 
 def generate_slc_tpc_wordclouds(nslicetopics, ntopics, exp_dir):
     """Function to generate wordclouds from a set of slice topics, and save them in a returned dictionary for re-use."""
-    from ._file_driver import read_pickle  # Import here to avoid circular imports
     
     wc_lib = {}
 
@@ -526,7 +525,6 @@ def generate_slc_tpc_wordclouds(nslicetopics, ntopics, exp_dir):
 
 def generate_tpc_wordclouds(X, int_dir):
     """Function to generate a dictionary of wordclouds from a matrix of topic word freq vectors."""
-    from ._file_driver import read_pickle  # Import here to avoid circular imports
     
     wc_lib = {}
 

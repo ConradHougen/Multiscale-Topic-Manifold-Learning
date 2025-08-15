@@ -15,6 +15,7 @@ from enum import Enum, auto
 from gensim.models import AuthorTopicModel
 from scipy.stats import kendalltau
 from .fast_encode_tree import TreeNode
+from .dataframe_schema import MainDataSchema
 
 
 # ============================================================================
@@ -97,7 +98,6 @@ class TermRelevanceTopicFilter:
 
 def preprocess_documents(chunks):
     """Function that extracts 'preprocessed_text' column per doc chunk"""
-    from .dataframe_schema import MainDataSchema
     
     preprocessed_chunks = []
     for chunk_df in chunks:

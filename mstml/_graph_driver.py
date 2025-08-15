@@ -17,7 +17,7 @@ import community as community_louvain  # For Louvain method
 from collections import Counter, defaultdict
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 from pathlib import Path
-from ._file_driver import get_data_int_dir
+from ._file_driver import get_data_int_dir, log_print, get_net_src_dir
 
 
 # ============================================================================
@@ -539,7 +539,6 @@ def topic_space_dist_vs_path_len_for_non_overlapping_max_paths(nxg, auth_vecs, d
 
 def topic_space_dist_vs_path_length(nxg, auth_vecs, auth_ids, log_file, dmetric, nsamples=10000):
     """Function to get degrees of separation (path length) in co-author network vs. topic distance"""
-    from ._file_driver import log_print  # Import here to avoid circular imports
     
     topic_distances = np.zeros(nsamples)
     path_len = np.zeros(nsamples)
@@ -632,7 +631,6 @@ def lp_expA_score(pred_net, train_net, test_net, name, out_dir):
 
 def graphml_viz_convert_file(dset, dsub, filename, overwrite=False, specific_directory=None):
     """Function to convert NX graphml file into a visualizable graphml file with unique edge ids"""
-    from ._file_driver import get_net_src_dir  # Import here to avoid circular imports
     
     if specific_directory != None:
         net_dir = specific_directory
@@ -680,7 +678,6 @@ def graphml_viz_convert_file(dset, dsub, filename, overwrite=False, specific_dir
 
 def graphml_viz_convert(dset, dsub, overwrite=False, specific_directory=None):
     """Function to convert NX graphml files into visualizable graphml files with unique edge ids"""
-    from ._file_driver import get_net_src_dir  # Import here to avoid circular imports
     
     if specific_directory != None:
         net_dir = specific_directory
@@ -737,7 +734,6 @@ def graphml_viz_convert(dset, dsub, overwrite=False, specific_directory=None):
 
 def convert_viz_graphml_to_pairs_file(dset, dsub, filename, specific_directory=None):
     """Function to convert viz_ .graphml file into a .pairs file (edge list) for HRG model"""
-    from ._file_driver import get_net_src_dir  # Import here to avoid circular imports
     
     if specific_directory != None:
         in_dir = specific_directory
@@ -789,7 +785,6 @@ def convert_viz_graphml_to_pairs_file(dset, dsub, filename, specific_directory=N
 
 def atoms_read_graphml_to_netx(dset, dsub, filename, specific_directory=None):
     """Wrapper for reading graphml file to networkx object"""
-    from ._file_driver import get_net_src_dir  # Import here to avoid circular imports
     
     if specific_directory != None:
         in_dir = specific_directory

@@ -20,6 +20,7 @@ import gensim
 import gensim.corpora as corpora
 import networkx as nx
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 from sklearn.decomposition import PCA
 
 from typing import Optional, Union, Dict, Any, List, Tuple
@@ -53,8 +54,6 @@ from ._graph_driver import (
     build_temporal_coauthor_networks_from_dataframe, 
     compose_networks_from_dict
 )
-from ._math_driver import *
-from ._topic_model_driver import *
 
 # Additional imports for methods
 import pickle
@@ -65,10 +64,12 @@ from scipy.spatial.distance import pdist, squareform
 from scipy.cluster.hierarchy import linkage, dendrogram
 from scipy.stats import entropy
 from collections import OrderedDict
-from ._math_driver import hellinger, diffuse_distribution
-from ._topic_model_driver import setup_author_probs_matrix
+from ._math_driver import hellinger, diffuse_distribution, rescale_parameter
+from ._topic_model_driver import setup_author_probs_matrix, find_max_min_cut_distance
 from .fast_encode_tree import fast_encode_tree_structure
-from ._file_driver import get_date_hour_minute
+from ._file_driver import get_date_hour_minute, log_print
+from scipy.cluster.hierarchy import fcluster
+from sklearn.manifold import TSNE
 
 """============================================================================
 Abstract Base Classes for Modular MSTML Components
@@ -734,8 +735,6 @@ class MstmlOrchestrator:
             )
             
             # Pre-configured components for advanced users
-            from mstml.data_loaders import JsonDataLoader
-            from mstml.author_disambiguation import AuthorDisambiguator
             
             # Configure DataLoader with date filtering
             data_loader = JsonDataLoader.with_config({
@@ -798,8 +797,7 @@ class MstmlOrchestrator:
         # Text processing components
         self.vocabulary = None
         self.global_lda_model = None  # For term relevancy filtering
-        self.preprocessed_corpus = None
-        
+
         # Temporal ensemble components
         self.time_chunks = []
         self.chunk_topic_models = []
@@ -817,7 +815,8 @@ class MstmlOrchestrator:
         # Topic manifold and embedding components
         self.topic_vectors = None  # All phi vectors from ensemble
         self.topic_knn_graph = None
-        self.topic_dendrogram = None
+        self.topic_dendrogram_linkage = None  # Raw scipy linkage matrix (Z)
+        self.topic_dendrogram = None          # Enhanced dendrogram with link probabilities
         self.internal_node_probabilities = {}
         self.topic_embedding = None
         
@@ -867,7 +866,6 @@ class MstmlOrchestrator:
             Self for method chaining
             
         Example:
-            from mstml.data_loaders import JsonDataLoader
             
             # Create and configure DataLoader
             loader = JsonDataLoader.with_config({
@@ -1438,7 +1436,7 @@ class MstmlOrchestrator:
                 try:
                     current_df = self.data_loader._apply_single_filter(filter_name, filter_config, current_df)
                 except Exception as e:
-                    self.logger.error(f"Filter '{filter_name}' failed: {e}")
+                    log_print(f"Filter '{filter_name}' failed: {e}", level="error", logger=self.logger)
                     continue
             else:
                 self.logger.warning(f"Filter '{filter_name}' not supported by current DataLoader")
@@ -1452,10 +1450,10 @@ class MstmlOrchestrator:
             # Debug: Show sample data after filtering
             if post_filter_count > 0 and filter_name == 'categories':
                 sample_categories = current_df['categories'].iloc[0] if 'categories' in current_df.columns else 'N/A'
-                self.logger.debug(f"Sample categories after filter: {sample_categories}")
+                log_print(f"Sample categories after filter: {sample_categories}", level="debug", logger=self.logger)
             elif post_filter_count > 0 and filter_name == 'date_range':
                 sample_date = current_df['date'].iloc[0] if 'date' in current_df.columns else 'N/A'
-                self.logger.debug(f"Sample date after filter: {sample_date}")
+                log_print(f"Sample date after filter: {sample_date}", level="debug", logger=self.logger)
         
         # Update the main dataframe
         self.documents_df = current_df
@@ -1554,7 +1552,6 @@ class MstmlOrchestrator:
         # Get or create author disambiguator
         disambiguator = self._author_disambiguator
         if disambiguator is None:
-            from .author_disambiguation import AuthorDisambiguator
             disambiguator = AuthorDisambiguator()
             self._author_disambiguator = disambiguator
         
@@ -1793,7 +1790,7 @@ class MstmlOrchestrator:
         )
         
         # Store results in orchestrator and update dataframe
-        self.preprocessed_corpus = processed_docs.tolist()
+        # Note: preprocessed text stored in dataframe to avoid memory duplication
         self.vocabulary = self.text_preprocessor.get_dictionary()
         self.bow_corpus = self.text_preprocessor.get_corpus()
         
@@ -1831,11 +1828,6 @@ class MstmlOrchestrator:
         dict_path = os.path.join(clean_dir, 'id2word.pkl')
         write_pickle(dict_path, self.vocabulary)
         self.logger.info(f"Saved vocabulary dictionary with {len(self.vocabulary)} terms to id2word.pkl")
-        
-        # Note: Removed unnecessary files:
-        # - preprocessed_corpus.pkl (can be regenerated from main_df + vocab)
-        # - bow_corpus.pkl (can be regenerated from preprocessed corpus + vocab)
-        # - preprocessing_stats.json (now tracked in experiment_params.json)
     
     
     # ========================================================================================
@@ -2087,7 +2079,9 @@ class MstmlOrchestrator:
         if not self.time_chunks:
             raise ValueError("No temporal chunks created. Call create_temporal_chunks() first.")
         
-        if self.preprocessed_corpus is None:
+        if (self.documents_df is None or 
+            MainDataSchema.PREPROCESSED_TEXT.colname not in self.documents_df.columns or
+            self.bow_corpus is None):
             raise ValueError("No preprocessed corpus available. Call preprocess_text() first.")
         
         self.logger.info(f"Training {base_model} ensemble models")
@@ -2367,13 +2361,18 @@ class MstmlOrchestrator:
     
     def construct_topic_dendrogram(self,
                                  linkage_method: str = 'ward',
-                                 height_normalization: bool = True) -> 'MstmlOrchestrator':
+                                 distance_metric: str = 'hellinger',
+                                 knn_neighbors: int = 50) -> 'MstmlOrchestrator':
         """
         Construct hierarchical topic dendrogram using agglomerative clustering.
         
+        Based on the reference implementation with proper handling of Ward's linkage
+        with Hellinger distances using sqrt transformation to Euclidean space.
+        
         Args:
-            linkage_method: Hierarchical clustering linkage ('ward', 'average', 'complete')
-            height_normalization: Normalize dendrogram heights to [0,1]
+            linkage_method: Hierarchical clustering linkage ('ward', 'average', 'complete', 'single')
+            distance_metric: Distance metric ('hellinger', 'euclidean', 'cosine')
+            knn_neighbors: Number of nearest neighbors for sparse distance matrix
         
         Returns:
             Self for method chaining
@@ -2382,60 +2381,138 @@ class MstmlOrchestrator:
         if self.topic_vectors is None:
             raise ValueError("No topic vectors available. Call train_ensemble_models() first.")
         
-        self.logger.info(f"Constructing topic dendrogram with {linkage_method} linkage")
+        self.logger.info(f"Constructing topic dendrogram with {linkage_method} linkage and {distance_metric} distance")
         
-        # Determine distance metric based on configuration
-        distance_metric = self.config['distance_metric']['type']
+        topic_matrix = np.array(self.topic_vectors).astype(np.float32)
+        n_topics = len(topic_matrix)
         
-        # Compute pairwise distances
-        if distance_metric.lower() == 'hellinger':
-            distances = pdist(self.topic_vectors, metric=hellinger)
-        elif distance_metric.lower() == 'euclidean':
-            distances = pdist(self.topic_vectors, metric='euclidean')
-        elif distance_metric.lower() == 'cosine':
-            distances = pdist(self.topic_vectors, metric='cosine')
+        # Handle Ward's linkage with Hellinger distance
+        if linkage_method.lower() == 'ward' and distance_metric.lower() == 'hellinger':
+            self.logger.info("Using sqrt transformation for Ward's linkage with Hellinger distance")
+            
+            # Use k-NN graph approach
+            if n_topics >= 100 and hasattr(self, 'topic_knn_graph') and self.topic_knn_graph is not None:
+                # Extract distances from existing k-NN graph
+                pairs = []
+                for i, j, data in self.topic_knn_graph.edges(data=True):
+                    # Convert Hellinger to squared Euclidean for Ward's
+                    hellinger_dist = data['weight']
+                    euclidean_dist_sq = (hellinger_dist * np.sqrt(2)) ** 2
+                    pairs.append((i, j, euclidean_dist_sq))
+                
+                # Create sparse distance matrix
+                distance_matrix = np.full((n_topics, n_topics), 1.0, dtype=np.float32)
+                np.fill_diagonal(distance_matrix, 0)
+                
+                for i, j, dist in pairs:
+                    distance_matrix[i, j] = dist
+                    distance_matrix[j, i] = dist
+                
+                # Convert to condensed form and compute linkage
+                condensed_distances = squareform(distance_matrix)
+                self.topic_dendrogram_linkage = linkage(condensed_distances, method='ward')
+                
+            else:
+                # Direct computation for smaller datasets
+                sqrt_vectors = np.sqrt(topic_matrix)
+                euclidean_distances = pdist(sqrt_vectors, metric='euclidean')
+                # Square the distances for Ward's linkage
+                squared_distances = euclidean_distances ** 2
+                self.topic_dendrogram_linkage = linkage(squared_distances, method='ward')
+        
+        elif linkage_method.lower() != 'ward':
+            # For non-Ward linkage methods
+            if distance_metric.lower() == 'hellinger':
+                distances = pdist(topic_matrix, metric=hellinger)
+            elif distance_metric.lower() == 'euclidean':
+                distances = pdist(topic_matrix, metric='euclidean')
+            elif distance_metric.lower() == 'cosine':
+                distances = pdist(topic_matrix, metric='cosine')
+            else:
+                self.logger.warning(f"Unknown distance metric {distance_metric}, using euclidean")
+                distances = pdist(topic_matrix, metric='euclidean')
+            
+            self.topic_dendrogram_linkage = linkage(distances, method=linkage_method)
+        
         else:
-            self.logger.warning(f"Unknown distance metric {distance_metric}, using euclidean")
-            distances = pdist(self.topic_vectors, metric='euclidean')
-        
-        # Perform hierarchical clustering
-        if linkage_method.lower() == 'ward':
-            # Ward linkage requires Euclidean distances
+            # Ward with non-Hellinger metrics
             if distance_metric.lower() != 'euclidean':
-                self.logger.warning("Ward linkage requires Euclidean distances, switching to average linkage")
-                linkage_method = 'average'
-        
-        # Compute linkage matrix
-        self.topic_dendrogram = linkage(distances, method=linkage_method)
-        
-        # Normalize heights if requested
-        if height_normalization:
-            min_height = np.min(self.topic_dendrogram[:, 2])
-            max_height = np.max(self.topic_dendrogram[:, 2])
+                self.logger.warning("Ward linkage works best with Euclidean distances")
             
-            if max_height > min_height:  # Avoid division by zero
-                self.topic_dendrogram[:, 2] = (
-                    (self.topic_dendrogram[:, 2] - min_height) / (max_height - min_height)
-                )
-            
-            self.logger.info(f"Normalized dendrogram heights to [0, 1]")
+            distances = pdist(topic_matrix, metric=distance_metric.lower())
+            self.topic_dendrogram_linkage = linkage(distances, method='ward')
+        
+        # Store original min/max heights for rescaling
+        self.min_cut_height = np.min(self.topic_dendrogram_linkage[:, 2])
+        self.max_cut_height = np.max(self.topic_dendrogram_linkage[:, 2])
+        
+        # Create enhanced dendrogram with link probabilities using fast_encode_tree_structure
+        self._create_enhanced_dendrogram()
         
         # Store dendrogram metadata
         self.dendrogram_info = {
             'linkage_method': linkage_method,
             'distance_metric': distance_metric,
-            'height_normalization': height_normalization,
-            'num_topics': len(self.topic_vectors),
-            'min_height': np.min(self.topic_dendrogram[:, 2]),
-            'max_height': np.max(self.topic_dendrogram[:, 2])
+            'num_topics': n_topics,
+            'min_cut_height': self.min_cut_height,
+            'max_cut_height': self.max_cut_height,
+            'knn_neighbors': knn_neighbors
         }
         
         self.logger.info(
-            f"Topic dendrogram constructed: {len(self.topic_vectors)} leaves, "
-            f"height range [{self.dendrogram_info['min_height']:.3f}, {self.dendrogram_info['max_height']:.3f}]"
+            f"Topic dendrogram constructed: {n_topics} leaves, "
+            f"cut height range [{self.min_cut_height:.3f}, {self.max_cut_height:.3f}]"
         )
         
         return self
+    
+    def _create_enhanced_dendrogram(self):
+        """
+        Create enhanced dendrogram with link probabilities using fast_encode_tree_structure.
+        
+        This is critical for interdisciplinarity scoring as it associates left-right link 
+        probabilities to each dendrogram internal node based on co-author network and topic vectors.
+        """
+        if self.topic_dendrogram_linkage is None:
+            raise ValueError("No linkage matrix available")
+        
+        # Check if we have required components for enhanced dendrogram
+        if (self.coauthor_network is None or 
+            not hasattr(self, 'author_topic_distributions') or 
+            self.author_topic_distributions is None):
+            
+            self.logger.warning(
+                "Co-author network or author topic distributions not available. "
+                "Enhanced dendrogram will be created when compute_author_embeddings() is called."
+            )
+            self.topic_dendrogram = None
+            return
+        
+        try:
+            self.logger.info("Creating enhanced dendrogram with link probabilities using fast_encode_tree_structure")
+            
+            # Call fast_encode_tree_structure with the linkage matrix (Z), author distributions, and network
+            encoded_root, author_index_map = fast_encode_tree_structure(
+                self.topic_dendrogram_linkage,  # Z matrix from scipy.linkage
+                self.author_topic_distributions,  # Author-topic distributions
+                self.coauthor_network  # Co-author network graph
+            )
+            
+            # Store the enhanced dendrogram and mapping
+            self.topic_dendrogram = encoded_root
+            self.author_index_map = author_index_map
+            
+            # Compute min/max cut distances for the enhanced dendrogram
+            self.max_cut_distance, self.min_cut_distance = find_max_min_cut_distance(encoded_root)
+            
+            self.logger.info(
+                f"Enhanced dendrogram created with cut distance range "
+                f"[{self.min_cut_distance:.3f}, {self.max_cut_distance:.3f}]"
+            )
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to create enhanced dendrogram: {e}")
+            self.topic_dendrogram = None
     
     def estimate_node_probabilities(self,
                                   use_author_embeddings: bool = True) -> 'MstmlOrchestrator':
@@ -2452,7 +2529,7 @@ class MstmlOrchestrator:
             Self for method chaining
         """
         
-        if self.topic_dendrogram is None:
+        if self.topic_dendrogram_linkage is None:
             raise ValueError("No topic dendrogram available. Call construct_topic_dendrogram() first.")
         
         if self.coauthor_network is None:
@@ -2475,7 +2552,7 @@ class MstmlOrchestrator:
         # Use fast tree encoding from the driver
         try:
             encoded_root, _ = fast_encode_tree_structure(
-                self.topic_dendrogram, 
+                self.topic_dendrogram_linkage, 
                 self.author_topic_distributions or {},
                 self.coauthor_network
             )
@@ -2487,14 +2564,14 @@ class MstmlOrchestrator:
             self.logger.warning(f"Fast tree encoding failed: {e}, using simplified estimation")
             
             # Fallback to simplified probability estimation
-            n_internal_nodes = len(self.topic_dendrogram)
+            n_internal_nodes = len(self.topic_dendrogram_linkage)
             self.internal_node_probabilities = {}
             
             for node_idx in range(n_internal_nodes):
                 # Get internal node information from linkage matrix
-                left_child = int(self.topic_dendrogram[node_idx, 0])
-                right_child = int(self.topic_dendrogram[node_idx, 1])
-                height = self.topic_dendrogram[node_idx, 2]
+                left_child = int(self.topic_dendrogram_linkage[node_idx, 0])
+                right_child = int(self.topic_dendrogram_linkage[node_idx, 1])
+                height = self.topic_dendrogram_linkage[node_idx, 2]
                 
                 # Estimate subtree sizes (simplified)
                 left_size = self._estimate_subtree_size(left_child, n_internal_nodes)
@@ -2692,6 +2769,12 @@ class MstmlOrchestrator:
         self.author_embeddings = np.array([
             self.author_topic_distributions[author_id] for author_id in author_ids
         ])
+        
+        # Create enhanced dendrogram with link probabilities now that author distributions are available
+        if (hasattr(self, 'topic_dendrogram_linkage') and self.topic_dendrogram_linkage is not None and
+            self.coauthor_network is not None and not hasattr(self, 'topic_dendrogram')):
+            self.logger.info("Creating enhanced dendrogram with link probabilities")
+            self._create_enhanced_dendrogram()
         
         self.logger.info(
             f"Computed embeddings for {len(self.author_topic_distributions)} authors "
@@ -2902,34 +2985,27 @@ class MstmlOrchestrator:
     
     def create_topic_embedding(self,
                              method: str = 'phate',
-                             n_components: int = 2,
+                             n_components: int = 3,
                              knn_neighbors: int = 5,
-                             gamma: float = 1.0,
+                             gamma: float = 0,
                              t: str = "auto",
-                             color_by: str = 'time',
-                             show_colorbar: bool = True,
-                             interactive: bool = False,
-                             figure_size: tuple = (10, 8),
-                             cut_height: Optional[float] = None,
+                             cut_height: float = 0.7,
+                             distance_metric: str = 'hellinger',
                              **method_kwargs) -> 'MstmlOrchestrator':
         """
-        Create topic space embedding for visualization based on dendrogram cut height.
+        Create topic space embedding for visualization using various manifold learning methods.
         
-        Supports multiple embedding methods including PHATE, PCA, UMAP, and t-SNE.
-        PHATE preserves local and global distances through density-adaptive
-        diffusion process, ideal for visualizing topic drift over time.
+        Based on reference implementation with proper Hellinger distance handling,
+        dendrogram integration, and support for 2D/3D embeddings.
         
         Args:
             method: Embedding method ('phate', 'pca', 'umap', 'tsne')
-            n_components: Number of embedding dimensions
+            n_components: Number of embedding dimensions (2 or 3)
             knn_neighbors: Number of nearest neighbors for PHATE/UMAP
-            gamma: PHATE gamma parameter for kernel bandwidth
-            t: Number of diffusion steps for PHATE
-            color_by: Color coding scheme ('time', 'meta_topic', 'none')
-            show_colorbar: Whether to display colorbar
-            interactive: Whether to create interactive plot (plotly vs matplotlib)
-            figure_size: Figure size as (width, height) tuple
-            cut_height: Dendrogram cut height for meta-topic clustering
+            gamma: PHATE gamma parameter for kernel bandwidth (0 = auto)
+            t: Number of diffusion steps for PHATE ('auto' or integer)
+            cut_height: Dendrogram cut height for meta-topic clustering (0-1 range)
+            distance_metric: Distance metric ('hellinger', 'euclidean', 'cosine')
             **method_kwargs: Additional parameters for specific embedding methods
         
         Returns:
@@ -2937,90 +3013,222 @@ class MstmlOrchestrator:
         """
         
         if self.topic_vectors is None:
-            raise ValueError("No topic vectors available. Call build_topic_manifold() first.")
+            raise ValueError("No topic vectors available. Call train_ensemble_models() first.")
         
-        self.logger.info(f"Creating {n_components}D {method.upper()} embedding with {color_by} coloring")
+        self.logger.info(f"Creating {n_components}D {method.upper()} embedding")
         
-        # Convert topic vectors to numpy array
-        topic_matrix = np.array(self.topic_vectors)
+        # Ensure dendrogram exists
+        if not hasattr(self, 'topic_dendrogram_linkage') or self.topic_dendrogram_linkage is None:
+            self.logger.info("Constructing topic dendrogram for embedding")
+            self.construct_topic_dendrogram(distance_metric=distance_metric)
         
-        # Apply dendrogram cut height if specified for meta-topic clustering
-        if cut_height is not None and hasattr(self, 'topic_dendrogram_linkage'):
-            from scipy.cluster.hierarchy import fcluster
-            self.topic_cluster_labels = fcluster(self.topic_dendrogram_linkage, 
-                                               cut_height, criterion='distance')
-            self.logger.info(f"Cut dendrogram at height {cut_height}, found {len(np.unique(self.topic_cluster_labels))} meta-topics")
+        # Convert topic vectors to numpy array with proper dtype
+        topic_matrix = np.array(self.topic_vectors, dtype=np.float32)
+        n_topics = topic_matrix.shape[0]
         
-        # Select and apply embedding method
+        # Validate parameters
+        if n_components <= 0:
+            raise ValueError("n_components must be positive")
+        if n_components >= n_topics:
+            log_print(
+                f"n_components ({n_components}) >= n_topics ({n_topics}). "
+                f"Reducing to {n_topics - 1} components.",
+                level="warning", logger=self.logger
+            )
+            n_components = n_topics - 1
+        if knn_neighbors >= n_topics:
+            log_print(
+                f"knn_neighbors ({knn_neighbors}) >= n_topics ({n_topics}). "
+                f"Reducing to {n_topics - 1} neighbors.",
+                level="warning", logger=self.logger
+            )
+            knn_neighbors = n_topics - 1
+        
+        # Apply dendrogram cut height if specified
+        if cut_height is not None:
+            cut_result = self.cut_topic_dendrogram(
+                cut_height=cut_height,
+                min_cluster_size=1,  # Allow all clusters for embedding purposes
+                validate_height=True
+            )
+        
+        # Compute embedding based on method
         method_lower = method.lower()
         
-        if method_lower == 'phate':
-            # PHATE embedding with Hellinger distance
-            if not PHATE_AVAILABLE:
-                self.logger.warning("PHATE not available, falling back to PCA")
-                method_lower = 'pca'
-            else:
-                # Compute Hellinger distance matrix
-                n_topics = len(self.topic_vectors)
-                distance_matrix = np.zeros((n_topics, n_topics))
+        if method_lower == 'phate' and PHATE_AVAILABLE:
+            # PHATE embedding with proper distance handling
+            try:
+                if distance_metric.lower() == 'hellinger':
+                    # Compute Hellinger distance matrix using pdist for efficiency
+                    hellinger_distances = pdist(topic_matrix, metric=hellinger)
+                    distance_matrix = squareform(hellinger_distances)
+                    
+                    # Use knn_dist='precomputed' instead of metric='precomputed' (from reference)
+                    phate_op = phate.PHATE(
+                        n_components=n_components,
+                        knn=knn_neighbors,
+                        gamma=gamma,
+                        t=t,
+                        knn_dist='precomputed',
+                        random_state=42,
+                        **method_kwargs
+                    )
+                    
+                    self.topic_embedding = phate_op.fit_transform(distance_matrix)
+                    
+                else:
+                    # For other distance metrics, use them directly if supported by PHATE
+                    metric_name = distance_metric.lower()
+                    if metric_name not in ['euclidean', 'cosine', 'l1', 'l2', 'manhattan']:
+                        # Fallback to euclidean for unsupported metrics
+                        log_print(
+                            f"Distance metric '{distance_metric}' not directly supported by PHATE, "
+                            f"falling back to euclidean distance", 
+                            level="warning", logger=self.logger
+                        )
+                        metric_name = 'euclidean'
+                    
+                    phate_op = phate.PHATE(
+                        n_components=n_components,
+                        knn=knn_neighbors,
+                        gamma=gamma,
+                        t=t,
+                        metric=metric_name,
+                        random_state=42,
+                        **method_kwargs
+                    )
+                    
+                    self.topic_embedding = phate_op.fit_transform(topic_matrix)
                 
-                for i in range(n_topics):
-                    for j in range(i+1, n_topics):
-                        dist = hellinger(topic_matrix[i], topic_matrix[j])
-                        distance_matrix[i, j] = dist
-                        distance_matrix[j, i] = dist
+                self.phate_operator = phate_op  # Store for t_value access
                 
-                # Create PHATE operator with precomputed distance
-                phate_op = phate.PHATE(
-                    n_components=n_components,
-                    knn=knn_neighbors,
-                    gamma=gamma,
-                    t=t,
-                    metric='precomputed',
-                    random_state=42,
-                    **method_kwargs
+            except Exception as e:
+                log_print(
+                    f"PHATE embedding failed: {e}. Falling back to PCA.",
+                    level="warning", logger=self.logger
                 )
-                
-                self.topic_embedding = phate_op.fit_transform(distance_matrix)
-                
-        if method_lower == 'pca':
-            # PCA embedding
-            pca = PCA(n_components=n_components, random_state=42, **method_kwargs)
-            self.topic_embedding = pca.fit_transform(topic_matrix)
-            self.logger.info(f"PCA explained variance ratio: {pca.explained_variance_ratio_}")
+                method_lower = 'pca'  # Fallback to PCA
             
         elif method_lower == 'umap':
             # UMAP embedding
             try:
                 import umap
-                umap_op = umap.UMAP(
-                    n_components=n_components,
-                    n_neighbors=knn_neighbors,
-                    random_state=42,
-                    **method_kwargs
-                )
-                self.topic_embedding = umap_op.fit_transform(topic_matrix)
+                
+                # Validate distance metric for UMAP
+                metric_name = distance_metric.lower()
+                if metric_name == 'hellinger':
+                    # UMAP doesn't support Hellinger directly, use precomputed
+                    hellinger_distances = pdist(topic_matrix, metric=hellinger)
+                    distance_matrix = squareform(hellinger_distances)
+                    
+                    umap_op = umap.UMAP(
+                        n_components=n_components,
+                        n_neighbors=knn_neighbors,
+                        metric='precomputed',
+                        random_state=42,
+                        **method_kwargs
+                    )
+                    self.topic_embedding = umap_op.fit_transform(distance_matrix)
+                else:
+                    # Validate supported metrics for UMAP
+                    supported_metrics = ['euclidean', 'manhattan', 'chebyshev', 'minkowski', 'cosine', 'correlation']
+                    if metric_name not in supported_metrics:
+                        log_print(
+                            f"Distance metric '{distance_metric}' not supported by UMAP, "
+                            f"falling back to euclidean distance", 
+                            level="warning", logger=self.logger
+                        )
+                        metric_name = 'euclidean'
+                    
+                    umap_op = umap.UMAP(
+                        n_components=n_components,
+                        n_neighbors=knn_neighbors,
+                        metric=metric_name,
+                        random_state=42,
+                        **method_kwargs
+                    )
+                    self.topic_embedding = umap_op.fit_transform(topic_matrix)
+                    
+                method_lower = 'umap'
+                
             except ImportError:
-                self.logger.warning("UMAP not available, falling back to PCA")
-                pca = PCA(n_components=n_components, random_state=42)
-                self.topic_embedding = pca.fit_transform(topic_matrix)
+                log_print("UMAP not available, falling back to PCA", level="warning", logger=self.logger)
+                method_lower = 'pca'
+            except Exception as e:
+                log_print(f"UMAP embedding failed: {e}. Falling back to PCA.", level="warning", logger=self.logger)
                 method_lower = 'pca'
                 
         elif method_lower == 'tsne':
             # t-SNE embedding
             try:
-                from sklearn.manifold import TSNE
-                tsne_op = TSNE(
-                    n_components=n_components,
-                    random_state=42,
-                    **method_kwargs
-                )
-                self.topic_embedding = tsne_op.fit_transform(topic_matrix)
-            except ImportError:
-                self.logger.warning("t-SNE not available, falling back to PCA")
-                pca = PCA(n_components=n_components, random_state=42)
-                self.topic_embedding = pca.fit_transform(topic_matrix)
+                # Validate parameters for t-SNE
+                if n_components > 3:
+                    log_print(
+                        f"t-SNE with {n_components} components may not be effective. "
+                        f"Consider using n_components <= 3 for t-SNE.",
+                        level="warning", logger=self.logger
+                    )
+                
+                # Adjust perplexity for small datasets
+                tsne_kwargs = method_kwargs.copy()
+                if 'perplexity' not in tsne_kwargs:
+                    # Default perplexity should be smaller than n_samples
+                    default_perplexity = min(30, (n_topics - 1) / 3)
+                    if default_perplexity < 5:
+                        default_perplexity = min(5, n_topics - 1)
+                    tsne_kwargs['perplexity'] = default_perplexity
+                    
+                    if tsne_kwargs['perplexity'] != 30:
+                        log_print(
+                            f"Adjusted t-SNE perplexity to {tsne_kwargs['perplexity']} for dataset with {n_topics} topics",
+                            level="info", logger=self.logger
+                        )
+                
+                # For t-SNE, handle distance metrics carefully
+                metric_name = distance_metric.lower()
+                if metric_name == 'hellinger':
+                    # Use precomputed distance matrix for Hellinger
+                    hellinger_distances = pdist(topic_matrix, metric=hellinger)
+                    distance_matrix = squareform(hellinger_distances)
+                    
+                    tsne_op = TSNE(
+                        n_components=n_components,
+                        metric='precomputed',
+                        random_state=42,
+                        **tsne_kwargs
+                    )
+                    self.topic_embedding = tsne_op.fit_transform(distance_matrix)
+                else:
+                    # Validate supported metrics for t-SNE
+                    supported_metrics = ['euclidean', 'l1', 'l2', 'manhattan', 'cosine']
+                    if metric_name not in supported_metrics:
+                        log_print(
+                            f"Distance metric '{distance_metric}' not supported by t-SNE, "
+                            f"falling back to euclidean distance", 
+                            level="warning", logger=self.logger
+                        )
+                        metric_name = 'euclidean'
+                    
+                    tsne_op = TSNE(
+                        n_components=n_components,
+                        metric=metric_name,
+                        random_state=42,
+                        **tsne_kwargs
+                    )
+                    self.topic_embedding = tsne_op.fit_transform(topic_matrix)
+                    
+                method_lower = 'tsne'
+                
+            except Exception as e:
+                log_print(f"t-SNE embedding failed: {e}. Falling back to PCA.", level="warning", logger=self.logger)
                 method_lower = 'pca'
+        
+        # Fallback to PCA (or explicit PCA request)
+        if method_lower == 'pca' or not hasattr(self, 'topic_embedding'):
+            pca = PCA(n_components=n_components, random_state=42, **method_kwargs)
+            self.topic_embedding = pca.fit_transform(topic_matrix)
+            log_print(f"PCA explained variance ratio: {pca.explained_variance_ratio_}", level="info", logger=self.logger)
+            method_lower = 'pca'
         
         # Store embedding parameters
         self.embed_params = {
@@ -3029,32 +3237,16 @@ class MstmlOrchestrator:
             'knn_neighbors': knn_neighbors,
             'gamma': gamma,
             't': t,
-            'color_by': color_by,
-            'show_colorbar': show_colorbar,
-            'interactive': interactive,
-            'figure_size': figure_size,
             'cut_height': cut_height,
-            'method_kwargs': method_kwargs
+            'distance_metric': distance_metric,
+            'method_kwargs': method_kwargs,
+            'n_topics': n_topics
         }
         
-        # Create time-based coloring information if requested
-        if color_by == 'time' and self.time_chunks:
-            self.topic_time_labels = []
-            for chunk_model in self.chunk_topic_models:
-                chunk_id = chunk_model['chunk_id']
-                num_topics = chunk_model['num_topics']
-                chunk_name = self.time_chunks[chunk_id]['name']
-                
-                # Assign time label to each topic in this chunk
-                self.topic_time_labels.extend([chunk_name] * num_topics)
-        
-        # Create meta-topic coloring information if dendrogram available
-        if color_by == 'meta_topic' and self.topic_cluster_labels is not None:
-            self.topic_cluster_colors = self.topic_cluster_labels
-        
-        self.logger.info(
+        log_print(
             f"Created {method_lower.upper()} embedding: "
-            f"{topic_matrix.shape[0]} topics -> {n_components}D space"
+            f"{n_topics} topics -> {n_components}D space",
+            level="info", logger=self.logger
         )
         
         return self
@@ -3073,47 +3265,172 @@ class MstmlOrchestrator:
         return self.create_topic_embedding(method='phate', **kwargs)
     
     def display_topic_embedding(self,
+                              color_by: str = 'meta_topic',
                               title: Optional[str] = None,
-                              save_path: Optional[str] = None) -> None:
+                              save_path: Optional[str] = None,
+                              figure_size: tuple = (12, 14),
+                              elevation: int = 25,
+                              azimuth: int = 60,
+                              show_colorbar: bool = True,
+                              show_histogram: bool = True,
+                              meta_topic_names: Optional[List[str]] = None) -> None:
         """
-        Display the topic embedding visualization.
+        Display sophisticated topic embedding visualization based on reference implementation.
+        
+        Creates publication-quality plots with proper coloring, 3D support, topic labeling,
+        and optional histogram subplot showing topic frequency distribution.
         
         Args:
+            color_by: Color scheme ('meta_topic', 'time', 'none')
             title: Custom title for the plot
             save_path: Optional path to save the figure
+            figure_size: Figure size as (width, height) tuple
+            elevation: 3D plot elevation angle (ignored for 2D)
+            azimuth: 3D plot azimuth angle (ignored for 2D)
+            show_colorbar: Whether to display colorbar
+            show_histogram: Whether to show topic frequency histogram
+            meta_topic_names: Optional list of names for meta-topics
         """
         if self.topic_embedding is None:
             raise ValueError("Topic embedding not created. Call create_topic_embedding() first.")
         
         params = self.embed_params
-        method_name = params.get('method', 'Embedding')
-        fig, ax = plt.subplots(figsize=params.get('figure_size', (10, 8)))
+        method_name = params.get('method', 'EMBEDDING')
+        n_components = params.get('n_components', 2)
+        cut_height = params.get('cut_height')
         
-        # Create scatter plot based on color scheme
-        if params.get('color_by') == 'time':
-            # TODO: Color by time chunk assignment
-            scatter = ax.scatter(self.topic_embedding[:, 0], self.topic_embedding[:, 1],
-                               c=range(len(self.topic_embedding)), cmap='viridis', alpha=0.7)
-            if params.get('show_colorbar', True):
-                plt.colorbar(scatter, ax=ax, label='Time')
-        elif params.get('color_by') == 'meta_topic':
-            # TODO: Color by meta-topic cluster assignment from dendrogram
-            scatter = ax.scatter(self.topic_embedding[:, 0], self.topic_embedding[:, 1],
-                               c='blue', alpha=0.7)  # Placeholder
+        # Determine if we have meta-topic clustering
+        has_meta_topics = (hasattr(self, 'topic_cluster_labels') and 
+                          self.topic_cluster_labels is not None and
+                          color_by == 'meta_topic')
+        
+        # Create figure layout based on options
+        if show_histogram and has_meta_topics:
+            fig = plt.figure(figsize=figure_size)
+            gs = fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.3)
+            ax1 = fig.add_subplot(gs[0], projection='3d' if n_components == 3 else None)
+            ax2 = fig.add_subplot(gs[1])
         else:
-            scatter = ax.scatter(self.topic_embedding[:, 0], self.topic_embedding[:, 1],
-                               c='blue', alpha=0.7)
+            fig, ax1 = plt.subplots(figsize=figure_size, 
+                                   subplot_kw={'projection': '3d'} if n_components == 3 else {})
+            ax2 = None
         
-        ax.set_xlabel(f'{method_name} 1')
-        ax.set_ylabel(f'{method_name} 2')
-        ax.set_title(title or f'{method_name} Embedding of Topic Manifold')
+        # Set 3D viewing angles
+        if n_components == 3:
+            ax1.view_init(elev=elevation, azim=azimuth)
+            ax1.set_facecolor('none')
         
-        if params.get('interactive', False):
-            # TODO: Convert to plotly for interactivity
-            self.logger.warning("Interactive plotting not yet implemented, showing static plot")
+        # Determine coloring scheme
+        if has_meta_topics:
+            # Use discrete colormap for meta-topics
+            unique_topics = np.unique(self.topic_cluster_labels)
+            num_topics = len(unique_topics)
+            
+            # Create discrete colormap with boundaries
+            cmap = plt.get_cmap('rainbow', num_topics)
+            boundaries = np.arange(min(self.topic_cluster_labels), 
+                                 max(self.topic_cluster_labels) + 2) - 0.5
+            norm = mcolors.BoundaryNorm(boundaries, ncolors=num_topics, clip=True)
+            
+            colors = self.topic_cluster_labels
+            colorbar_label = 'Meta-Topic'
+            
+        elif color_by == 'time' and hasattr(self, 'chunk_topics'):
+            # Color by time chunks
+            time_labels = []
+            for topic_info in self.chunk_topics:
+                chunk_id = topic_info['chunk_id']
+                chunk_name = f"Chunk {chunk_id}"
+                if hasattr(self, 'time_chunks') and chunk_id < len(self.time_chunks):
+                    chunk_name = self.time_chunks[chunk_id].get('name', chunk_name)
+                time_labels.append(chunk_id)
+            
+            cmap = plt.cm.viridis
+            norm = None
+            colors = time_labels
+            colorbar_label = 'Time Chunk'
+            
+        else:
+            # Default single color
+            cmap = None
+            norm = None
+            colors = 'blue'
+            colorbar_label = None
+        
+        # Create the main scatter plot
+        if n_components == 3:
+            scatter = ax1.scatter(self.topic_embedding[:, 0], 
+                                self.topic_embedding[:, 1], 
+                                self.topic_embedding[:, 2],
+                                c=colors, cmap=cmap, norm=norm, 
+                                marker='o', s=10, edgecolor='k', alpha=0.7)
+        else:
+            scatter = ax1.scatter(self.topic_embedding[:, 0], 
+                                self.topic_embedding[:, 1],
+                                c=colors, cmap=cmap, norm=norm, 
+                                marker='o', s=50, edgecolor='k', alpha=0.7)
+        
+        # Add topic representative point labels
+        if has_meta_topics:
+            self._add_topic_representative_labels(ax1, n_components, meta_topic_names)
+        
+        # Set axis labels and title
+        if n_components == 3:
+            ax1.set_xlabel(f'{method_name} 1')
+            ax1.set_ylabel(f'{method_name} 2') 
+            ax1.set_zlabel(f'{method_name} 3')
+            # Remove tick labels for cleaner look
+            ax1.set_xticklabels([])
+            ax1.set_yticklabels([])
+            ax1.set_zticklabels([])
+        else:
+            ax1.set_xlabel(f'{method_name} 1')
+            ax1.set_ylabel(f'{method_name} 2')
+        
+        if title:
+            ax1.set_title(title)
+        
+        # Add colorbar if requested and applicable
+        if show_colorbar and colorbar_label and cmap:
+            if has_meta_topics:
+                # Create discrete colorbar
+                sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+                sm.set_array([])
+                
+                # Position colorbar appropriately
+                cbar_ax = fig.add_axes([0.8, 0.5, 0.02, 0.25])
+                cbar = fig.colorbar(sm, cax=cbar_ax, 
+                                  ticks=np.arange(min(self.topic_cluster_labels), 
+                                                max(self.topic_cluster_labels) + 1))
+                
+                # Add meta-topic names if provided
+                if meta_topic_names and len(meta_topic_names) == num_topics:
+                    cbar.ax.set_yticklabels(meta_topic_names)
+                
+                # Add black dividers between color segments
+                for boundary in boundaries[1:-1]:
+                    cbar.ax.hlines(boundary, *cbar.ax.get_xlim(), 
+                                 color='black', linewidth=1.5)
+            else:
+                plt.colorbar(scatter, ax=ax1, label=colorbar_label)
+        
+        # Add histogram subplot if requested
+        if show_histogram and ax2 is not None and has_meta_topics:
+            topic_label_counts = np.bincount(self.topic_cluster_labels)[min(self.topic_cluster_labels):]
+            
+            # Set colors for histogram bars based on topic labels
+            hist_colors = [cmap(norm(label)) for label in unique_topics]
+            ax2.bar(unique_topics, topic_label_counts, color=hist_colors, edgecolor='black')
+            
+            ax2.set_xlabel('Meta-Topic Labels')
+            ax2.set_ylabel('Frequency')
+            ax2.set_xticks(np.arange(min(self.topic_cluster_labels), 
+                                   max(self.topic_cluster_labels) + 1, 
+                                   step=max(1, num_topics // 15)))
         
         self.embed_figure = fig
         
+        # Save if requested
         if save_path:
             fig.savefig(save_path, dpi=300, bbox_inches='tight')
             self.logger.info(f"{method_name} embedding saved to {save_path}")
@@ -3121,43 +3438,219 @@ class MstmlOrchestrator:
         plt.show()
         self.logger.info(f"{method_name} embedding displayed")
     
+    def _add_topic_representative_labels(self, ax, n_components: int, meta_topic_names: Optional[List[str]] = None):
+        """
+        Add intelligent topic representative point labels based on reference algorithm.
+        
+        Implements the iterative optimization algorithm from reference code to select
+        representative points that balance centroid proximity and pairwise distances.
+        """
+        if not hasattr(self, 'topic_cluster_labels') or self.topic_cluster_labels is None:
+            return
+        
+        unique_topics = np.unique(self.topic_cluster_labels)
+        
+        # Compute topic centroids
+        topic_centroids = {}
+        for topic in unique_topics:
+            topic_indices = np.where(self.topic_cluster_labels == topic)[0]
+            topic_points = self.topic_embedding[topic_indices]
+            topic_centroids[topic] = np.mean(topic_points, axis=0)
+        
+        # Find embedding center
+        embed_center = np.mean(self.topic_embedding, axis=0)
+        
+        # Initialize representative points: closest to each topic's centroid
+        topic_representatives = {}
+        for topic in unique_topics:
+            topic_indices = np.where(self.topic_cluster_labels == topic)[0]
+            topic_points = self.topic_embedding[topic_indices]
+            distances_to_centroid = np.linalg.norm(topic_points - topic_centroids[topic], axis=1)
+            topic_representatives[topic] = topic_indices[np.argmin(distances_to_centroid)]
+        
+        # Iterative optimization
+        max_iterations = 100
+        alpha = 0.25  # Weight balance parameter
+        converged = False
+        iteration = 0
+        
+        while not converged and iteration < max_iterations:
+            converged = True
+            
+            for topic in unique_topics:
+                current_rep_index = topic_representatives[topic]
+                topic_indices = np.where(self.topic_cluster_labels == topic)[0]
+                best_rep_index = current_rep_index
+                max_weighted_score = -np.inf
+                
+                # Evaluate candidate points
+                for candidate_index in topic_indices:
+                    candidate_point = self.topic_embedding[candidate_index]
+                    
+                    # Midpoint between candidate and topic centroid
+                    midpoint = (candidate_point + topic_centroids[topic]) / 2
+                    
+                    # Pairwise distance score to other representatives
+                    pairwise_distance_sum = sum(
+                        np.linalg.norm(midpoint - self.topic_embedding[topic_representatives[other_topic]])
+                        for other_topic in unique_topics if other_topic != topic
+                    )
+                    
+                    # Proximity to topic centroid
+                    centroid_proximity = -np.linalg.norm(candidate_point - topic_centroids[topic])
+                    
+                    # Weighted score
+                    weighted_score = alpha * pairwise_distance_sum + (1 - alpha) * centroid_proximity
+                    
+                    if weighted_score > max_weighted_score:
+                        best_rep_index = candidate_index
+                        max_weighted_score = weighted_score
+                
+                # Update if changed
+                if best_rep_index != current_rep_index:
+                    topic_representatives[topic] = best_rep_index
+                    converged = False
+            
+            iteration += 1
+        
+        # Add labels to the plot
+        for topic, index in topic_representatives.items():
+            point = self.topic_embedding[index]
+            
+            # Determine label text
+            if meta_topic_names and len(meta_topic_names) >= topic:
+                label_text = meta_topic_names[topic - 1] if topic > 0 else f'<{topic}>'
+            else:
+                label_text = f'<{topic}>'
+            
+            # Add text annotation
+            if n_components == 3:
+                ax.text(point[0], point[1], point[2], label_text,
+                       size=12, zorder=3, color='white',
+                       bbox=dict(facecolor='black', alpha=0.6, boxstyle='round,pad=0.5'))
+            else:
+                ax.annotate(label_text, (point[0], point[1]),
+                           xytext=(5, 5), textcoords='offset points',
+                           size=12, color='white',
+                           bbox=dict(facecolor='black', alpha=0.6, boxstyle='round,pad=0.5'),
+                           ha='left')
+    
     def save_topic_embedding(self,
                            filename: Optional[str] = None,
-                           format: str = 'png',
-                           dpi: int = 300) -> str:
+                           format: str = 'pdf',
+                           dpi: int = 300,
+                           save_subplots: bool = True,
+                           elevation: Optional[int] = None,
+                           azimuth: Optional[int] = None) -> Dict[str, str]:
         """
-        Save the topic embedding figure to the experiment directory.
+        Save the topic embedding figure with rich filename generation matching reference code.
+        
+        Generates filenames that include key parameters like method, cut_height, knn_neighbors,
+        and viewing angles. Supports saving individual subplots and combined figures.
         
         Args:
-            filename: Custom filename (without extension). Auto-generated if None.
-            format: Image format ('png', 'pdf', 'svg', 'eps')
+            filename: Custom base filename (without extension). Auto-generated if None.
+            format: Image format ('pdf', 'png', 'svg', 'eps')
             dpi: Resolution for raster formats
+            save_subplots: Whether to save individual subplots separately
+            elevation: 3D elevation angle for filename (uses display value if None)
+            azimuth: 3D azimuth angle for filename (uses display value if None)
         
         Returns:
-            Path to saved file
+            Dictionary mapping save types to file paths
         """
         if self.embed_figure is None:
             raise ValueError("No topic embedding figure to save. Call display_topic_embedding() first.")
         
-        # Generate filename if not provided
+        # Get parameters for filename generation
+        params = self.embed_params
+        method_name = params.get('method', 'embedding').lower()
+        cut_height = params.get('cut_height', 0.0)
+        knn_neighbors = params.get('knn_neighbors', 5)
+        n_components = params.get('n_components', 2)
+        
+        # Get t_value from PHATE operator if available
+        t_value = 'auto'
+        if hasattr(self, 'phate_operator') and hasattr(self.phate_operator, 't'):
+            t_value = getattr(self.phate_operator, 't', 'auto')
+        
+        # Use provided angles or defaults
+        el = elevation if elevation is not None else 25
+        az = azimuth if azimuth is not None else 60
+        
+        saved_files = {}
+        
+        # Generate rich filename based on reference pattern
         if filename is None:
-            timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-            method_name = self.embed_params.get('method', 'embedding').lower()
-            color_suffix = f"_{self.embed_params.get('color_by', 'default')}"
-            filename = f"{method_name}_topic_embedding{color_suffix}_{timestamp}"
+            # Base filename pattern: method + knn + hellinger + dendro + cut_height + t_value + angles
+            base_filename = f"{method_name}{knn_neighbors}_hellinger_dendro_{cut_height:.2f}_cut_topic_cluster_t{t_value}"
+            
+            # Add 3D viewing angles for 3D plots
+            if n_components == 3:
+                base_filename += f"_el{el}_az{az}"
+        else:
+            base_filename = filename
         
-        # Construct full path using experiment directory for results
-        save_path = os.path.join(self.experiment_directory, f"{filename}.{format}")
+        # Ensure experiment directory exists
+        if hasattr(self, 'experiment_directory') and self.experiment_directory:
+            save_dir = self.experiment_directory
+        else:
+            save_dir = os.getcwd()
+        os.makedirs(save_dir, exist_ok=True)
         
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        # Save complete figure
+        complete_path = os.path.join(save_dir, f"zzz_{base_filename}.{format}")
+        self.embed_figure.savefig(complete_path, format=format, dpi=dpi, bbox_inches='tight')
+        saved_files['complete'] = complete_path
         
-        # Save figure
-        self.embed_figure.savefig(save_path, format=format, dpi=dpi, bbox_inches='tight')
+        # Save individual subplots if requested (matching reference pattern)
+        if save_subplots and hasattr(self.embed_figure, 'axes'):
+            axes = self.embed_figure.axes
+            
+            # Save main embedding plot (first axis)
+            if len(axes) >= 1:
+                ax1 = axes[0]
+                extent1 = ax1.get_tightbbox(self.embed_figure.canvas.get_renderer()).transformed(
+                    self.embed_figure.dpi_scale_trans.inverted())
+                
+                if n_components == 3:
+                    # 3D plot with special positioning adjustments
+                    expanded_extent1 = extent1.expanded(1.2, 0.85)
+                    expanded_extent1 = expanded_extent1.translated(
+                        0.72 + 0.02 * abs(az - 45), 
+                        -0.25 + 0.01 * abs(el - 45)
+                    )
+                    embedding_path = os.path.join(save_dir, f"zzs_{base_filename}.{format}")
+                else:
+                    # 2D plot
+                    expanded_extent1 = extent1.expanded(1.05, 1.05)
+                    embedding_path = os.path.join(save_dir, f"zzs_{base_filename}.{format}")
+                
+                self.embed_figure.savefig(embedding_path, format=format, dpi=dpi, 
+                                        bbox_inches=expanded_extent1)
+                saved_files['embedding'] = embedding_path
+            
+            # Save histogram subplot if present (second axis)
+            if len(axes) >= 2:
+                ax2 = axes[1]
+                extent2 = ax2.get_tightbbox(self.embed_figure.canvas.get_renderer()).transformed(
+                    self.embed_figure.dpi_scale_trans.inverted())
+                
+                expanded_extent2 = extent2.expanded(1.05, 1.05)
+                expanded_extent2 = expanded_extent2.translated(0, 0.05)
+                
+                histogram_path = os.path.join(save_dir, f"zzh_{base_filename}.{format}")
+                self.embed_figure.savefig(histogram_path, format=format, dpi=dpi, 
+                                        bbox_inches=expanded_extent2)
+                saved_files['histogram'] = histogram_path
         
-        method_name = self.embed_params.get('method', 'Embedding')
-        self.logger.info(f"{method_name} topic embedding saved to {save_path}")
-        return save_path
+        # Log all saved files
+        method_display = params.get('method', 'Embedding')
+        self.logger.info(f"{method_display} topic embedding saved:")
+        for save_type, path in saved_files.items():
+            self.logger.info(f"  {save_type}: {path}")
+        
+        return saved_files
     
     def identify_topic_trajectories(self,
                                   trajectory_algorithm: str = 'shortest_path',
@@ -3217,51 +3710,113 @@ class MstmlOrchestrator:
         """
         Cut topic dendrogram at specified height to create meta-topic clusters.
         
+        Cuts the hierarchical clustering dendrogram at the specified height to group
+        topics into meta-topic clusters. Provides detailed analysis of resulting clusters
+        including statistics, assignments, and filtering by minimum cluster size.
+        
         Args:
-            cut_height: Height at which to cut dendrogram. If None, uses median height.
-            min_cluster_size: Minimum size for valid clusters
+            cut_height: Height at which to cut dendrogram (0-1 range is auto-scaled). 
+                       If None, uses median height between min/max.
+            min_cluster_size: Minimum size for valid clusters (clusters smaller than this are filtered out)
             validate_height: Whether to validate cut_height against dendrogram bounds
         
         Returns:
-            Dictionary containing cluster assignments and analysis results
+            Dictionary containing:
+                - cut_height: Original cut height parameter
+                - actual_cut_height: Rescaled cut height used for cutting
+                - num_clusters: Number of valid clusters (meeting min_cluster_size)
+                - num_total_clusters: Total clusters before filtering
+                - cluster_assignments: Dict mapping topic_id -> cluster_id for valid clusters
+                - cluster_sizes: Dict mapping cluster_id -> cluster_size for valid clusters  
+                - cluster_statistics: Dict with centroid, variance, etc. for each cluster
+                - filtered_out_clusters: Number of clusters removed by size filtering
+        
+        Side Effects:
+            Sets self.topic_cluster_labels with the cluster assignment array
         """
-        if self.topic_dendrogram is None:
+        if self.topic_dendrogram_linkage is None:
             raise ValueError("Topic dendrogram not constructed. Call construct_topic_dendrogram() first.")
         
-        # Get dendrogram height bounds if validation requested
-        if validate_height and hasattr(self, 'topic_dendrogram'):
-            # TODO: Extract actual min/max heights from dendrogram structure
-            min_height = 0.0  # Placeholder - should be actual minimum
-            max_height = 1.0  # Placeholder - should be actual maximum
+        if min_cluster_size < 1:
+            raise ValueError("min_cluster_size must be at least 1")
+        
+        # Get dendrogram height bounds from actual dendrogram structure
+        if validate_height and hasattr(self, 'topic_dendrogram_linkage'):
+            # Extract actual min/max heights from dendrogram linkage matrix
+            if hasattr(self, 'min_cut_height') and hasattr(self, 'max_cut_height'):
+                min_height = self.min_cut_height
+                max_height = self.max_cut_height
+            else:
+                # Fallback: compute from linkage matrix
+                min_height = 0.0
+                max_height = float(np.max(self.topic_dendrogram_linkage[:, 2]))
             
             if cut_height is None:
                 cut_height = (min_height + max_height) / 2.0
             elif cut_height < min_height or cut_height > max_height:
-                self.logger.warning(
+                log_print(
                     f"Cut height {cut_height} outside valid range [{min_height:.3f}, {max_height:.3f}]. "
-                    f"Clamping to valid range."
+                    f"Clamping to valid range.", level="warning", logger=self.logger
                 )
                 cut_height = max(min_height, min(cut_height, max_height))
         elif cut_height is None:
             cut_height = 0.5  # Default fallback
         
-        # TODO: Implement dendrogram cutting and cluster analysis
-        # - Cut dendrogram at specified height to create meta-topics
-        # - Filter clusters by minimum size requirement
-        # - Analyze topic and author distributions within each cluster
-        # - Compute cluster-level statistics and relationships
-        # - Return cluster assignments and metadata
+        # Rescale cut_height from [0,1] to actual dendrogram range if needed
+        actual_cut_height = cut_height
+        if (hasattr(self, 'min_cut_height') and hasattr(self, 'max_cut_height') and 
+            0 <= cut_height <= 1):
+            actual_cut_height = rescale_parameter(cut_height, self.min_cut_height, self.max_cut_height)
+        
+        # Cut dendrogram at specified height to create meta-topics
+        cluster_labels = fcluster(self.topic_dendrogram_linkage, actual_cut_height, criterion='distance')
+        
+        # Analyze clusters
+        unique_clusters = np.unique(cluster_labels)
+        cluster_assignments = {i: int(cluster_labels[i]) for i in range(len(cluster_labels))}
+        cluster_sizes = {cluster_id: int(np.sum(cluster_labels == cluster_id)) for cluster_id in unique_clusters}
+        
+        # Filter clusters by minimum size requirement
+        valid_clusters = {cid: size for cid, size in cluster_sizes.items() if size >= min_cluster_size}
+        filtered_assignments = {topic_id: cluster_id for topic_id, cluster_id in cluster_assignments.items() 
+                              if cluster_id in valid_clusters}
+        
+        # Store cluster labels in orchestrator for other methods to use
+        self.topic_cluster_labels = cluster_labels
+        
+        # Compute cluster-level statistics
+        cluster_statistics = {}
+        if hasattr(self, 'topic_vectors') and self.topic_vectors is not None:
+            topic_matrix = np.array(self.topic_vectors)
+            for cluster_id in valid_clusters:
+                cluster_indices = np.where(cluster_labels == cluster_id)[0]
+                cluster_topics = topic_matrix[cluster_indices]
+                
+                cluster_statistics[cluster_id] = {
+                    'centroid': np.mean(cluster_topics, axis=0),
+                    'std': np.std(cluster_topics, axis=0),
+                    'intra_cluster_variance': float(np.mean(np.var(cluster_topics, axis=0))),
+                    'topic_indices': cluster_indices.tolist()
+                }
         
         result = {
             'cut_height': cut_height,
+            'actual_cut_height': actual_cut_height,
             'min_cluster_size': min_cluster_size,
-            'num_clusters': 0,  # Placeholder
-            'cluster_assignments': {},  # topic_id -> cluster_id mapping
-            'cluster_sizes': {},  # cluster_id -> size
-            'cluster_statistics': {}  # cluster-level analysis
+            'num_clusters': len(valid_clusters),
+            'num_total_clusters': len(unique_clusters),
+            'cluster_assignments': filtered_assignments,
+            'cluster_sizes': valid_clusters,
+            'cluster_statistics': cluster_statistics,
+            'filtered_out_clusters': len(unique_clusters) - len(valid_clusters)
         }
         
-        self.logger.info(f"Cut topic dendrogram at height {cut_height:.3f}")
+        log_print(
+            f"Cut topic dendrogram at height {cut_height:.3f} (actual: {actual_cut_height:.3f}), "
+            f"found {len(valid_clusters)} meta-topics ({len(unique_clusters)} total clusters, "
+            f"{len(unique_clusters) - len(valid_clusters)} filtered out by size)",
+            level="info", logger=self.logger
+        )
         return result
     
     def export_results(self,
@@ -3560,9 +4115,11 @@ class MstmlOrchestrator:
         return {
             'data_loaded': self.documents_df is not None,
             'coauthor_network_built': self.coauthor_network is not None,
-            'text_preprocessed': self.preprocessed_corpus is not None,
+            'text_preprocessed': (self.documents_df is not None and 
+                                MainDataSchema.PREPROCESSED_TEXT.colname in self.documents_df.columns and
+                                self.bow_corpus is not None),
             'ensemble_trained': len(self.chunk_topic_models) > 0,
-            'dendrogram_built': self.topic_dendrogram is not None,
+            'dendrogram_built': self.topic_dendrogram_linkage is not None,
             'author_embeddings_computed': self.author_embeddings is not None,
             'topic_embedding_created': self.topic_embedding is not None,
             'num_documents': len(self.documents_df) if self.documents_df is not None else 0,

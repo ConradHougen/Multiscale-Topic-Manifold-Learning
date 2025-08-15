@@ -23,6 +23,10 @@ Hellinger distance, or other f-divergences, may give different results in terms 
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from scipy.spatial import distance
+from gensim.models import CoherenceModel
+from gensim.corpora import Dictionary
+from sklearn.metrics import silhouette_score
+from sklearn.cluster import KMeans
 
 
 EPSILON = 1e-10
@@ -154,8 +158,6 @@ def topic_coherence_score(topic_words, texts, measure='c_v'):
         Coherence score
     """
     try:
-        from gensim.models import CoherenceModel
-        from gensim.corpora import Dictionary
         
         # Create dictionary and corpus
         dictionary = Dictionary(texts)
@@ -234,8 +236,6 @@ def silhouette_score_topics(doc_topic_matrix, doc_labels=None):
         Silhouette score
     """
     try:
-        from sklearn.metrics import silhouette_score
-        from sklearn.cluster import KMeans
         
         if doc_labels is None:
             # Use topic assignments as labels
