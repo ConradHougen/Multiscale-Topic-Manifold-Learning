@@ -235,7 +235,7 @@ Multiscale-Topic-Manifold-Learning/
 See the `notebooks/` directory for comprehensive examples:
 
 - `01_gdltm_geometric_longitudinal_topic_model.ipynb`: GDLTM topic evolution analysis
-- `02_mstml_multimodal_topic_drift.ipynb`: Multi-scale topic drift detection
+- `02_mstml_multimodal_topic_drift.ipynb`: Multiscale topic drift detection
 - `03_mstml_vocabulary_filtering_and_tuning.ipynb`: Text preprocessing and vocabulary optimization
 - `04_mstml_network_link_prediction.ipynb`: Co-author network analysis and link prediction
 
@@ -261,7 +261,7 @@ If you use this code in your research, please cite:
 
 @unpublished{hougen2025mstml,
   author  = {Conrad D. Hougen and Karl T. Pazdernik and Alfred O. Hero},
-  title   = {Multi-Scale Topic Manifold Learning for Understanding Interdisciplinary Collaborations in Co-Author Networks},
+  title   = {Multiscale Topic Manifold Learning for Understanding Interdisciplinarity in Co-Authored Articles},
   note    = {Preprint}
 }
 ```

@@ -2991,6 +2991,8 @@ class MstmlOrchestrator:
                              t: str = "auto",
                              cut_height: float = 0.7,
                              distance_metric: str = 'hellinger',
+                             linkage_method: str = 'ward',
+                             dendrogram_knn_neighbors: int = 50,
                              **method_kwargs) -> 'MstmlOrchestrator':
         """
         Create topic space embedding for visualization using various manifold learning methods.
@@ -3006,6 +3008,8 @@ class MstmlOrchestrator:
             t: Number of diffusion steps for PHATE ('auto' or integer)
             cut_height: Dendrogram cut height for meta-topic clustering (0-1 range)
             distance_metric: Distance metric ('hellinger', 'euclidean', 'cosine')
+            linkage_method: Hierarchical clustering linkage method ('ward', 'average', 'complete', 'single')
+            dendrogram_knn_neighbors: Number of nearest neighbors for dendrogram construction
             **method_kwargs: Additional parameters for specific embedding methods
         
         Returns:
@@ -3015,12 +3019,21 @@ class MstmlOrchestrator:
         if self.topic_vectors is None:
             raise ValueError("No topic vectors available. Call train_ensemble_models() first.")
         
+        # Validate linkage method
+        VALID_LINKAGE_METHODS = ['ward', 'single', 'complete', 'average', 'weighted', 'centroid', 'median']
+        if linkage_method not in VALID_LINKAGE_METHODS:
+            raise ValueError(f"linkage_method must be one of {VALID_LINKAGE_METHODS}")
+        
         self.logger.info(f"Creating {n_components}D {method.upper()} embedding")
         
-        # Ensure dendrogram exists
+        # Ensure dendrogram exists with user-specified parameters
         if not hasattr(self, 'topic_dendrogram_linkage') or self.topic_dendrogram_linkage is None:
-            self.logger.info("Constructing topic dendrogram for embedding")
-            self.construct_topic_dendrogram(distance_metric=distance_metric)
+            self.logger.info(f"Constructing topic dendrogram for embedding (linkage={linkage_method}, knn={dendrogram_knn_neighbors})")
+            self.construct_topic_dendrogram(
+                linkage_method=linkage_method,
+                distance_metric=distance_metric,
+                knn_neighbors=dendrogram_knn_neighbors
+            )
         
         # Convert topic vectors to numpy array with proper dtype
         topic_matrix = np.array(self.topic_vectors, dtype=np.float32)
