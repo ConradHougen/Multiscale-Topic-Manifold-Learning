@@ -266,7 +266,7 @@ If you use this code in your research, please cite:
   author    = {Conrad D. Hougen and Karl T. Pazdernik and Alfred O. Hero},
   title     = {Multiscale Topic Manifold Learning for Understanding Interdisciplinarity in Co-Authored Articles},
   journal   = {arXiv preprint},
-  year      = {2025}0
+  year      = {2025}
 }
 ```
 
