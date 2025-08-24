@@ -253,13 +253,16 @@ The framework creates preprocessed data in the following format:
 If you use this code in your research, please cite:
 
 ```bibtex
-@unpublished{hougen2025mstml_camsap,
-  author  = {Conrad D. Hougen and Karl T. Pazdernik and Alfred O. Hero},
-  title   = {A Multiscale Geometric Method for Capturing Relational Topic Alignment},
-  note    = {Preprint}
+@inproceedings{hougen2025mstml_camsap,
+  author    = {Conrad D. Hougen and Karl T. Pazdernik and Alfred O. Hero},
+  title     = {A Multiscale Geometric Method for Capturing Relational Topic Alignment},
+  booktitle = {Proceedings of the 2025 IEEE International Workshop on Computational Advances in Multi-Sensor Adaptive Processing (CAMSAP)},
+  year      = {2025},
+  publisher = {IEEE}
 }
 
-@unpublished{hougen2025mstml,
+
+@unpublished{hougen2025mstml_arxiv,
   author  = {Conrad D. Hougen and Karl T. Pazdernik and Alfred O. Hero},
   title   = {Multiscale Topic Manifold Learning for Understanding Interdisciplinarity in Co-Authored Articles},
   note    = {Preprint}
