@@ -14,19 +14,16 @@ import json  # For metadata
 import datetime as dt
 import pandas.api.types as ptypes
 import multiprocessing as mp
-from abc import ABC, abstractmethod
-
+import random
+import warnings
+import shutil
 import gensim
+import pickle
 import gensim.corpora as corpora
 import networkx as nx
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from sklearn.decomposition import PCA
 
-from typing import Optional, Union, Dict, Any, List, Tuple
-from collections import defaultdict
-from itertools import combinations
-from pathlib import Path
 
 # Optional imports with fallbacks
 try:
@@ -41,6 +38,27 @@ try:
 except ImportError:
     FAISS_AVAILABLE = False
 
+try:
+    import umap
+    UMAP_AVAILABLE = True
+except ImportError:
+    UMAP_AVAILABLE = False
+
+from datetime import datetime
+from gensim.models import LdaModel, LdaMulticore, CoherenceModel
+from gensim.corpora import Dictionary
+from scipy.spatial.distance import pdist, squareform
+from scipy.cluster.hierarchy import linkage, dendrogram
+from scipy.stats import entropy
+from collections import OrderedDict
+from scipy.cluster.hierarchy import fcluster
+from sklearn.manifold import TSNE
+from abc import ABC, abstractmethod
+from sklearn.decomposition import PCA
+from typing import Optional, Union, Dict, Any, List, Tuple
+from collections import defaultdict
+from itertools import combinations
+from pathlib import Path
 from .dataframe_schema import FieldDef, MainDataSchema
 from .data_loaders import get_dataset_directory, JsonDataLoader, DataLoader
 from .data_loader_registry import DataLoaderRegistry
@@ -54,27 +72,14 @@ from ._graph_driver import (
     build_temporal_coauthor_networks_from_dataframe, 
     compose_networks_from_dict
 )
-
-# Additional imports for methods
-import pickle
-from datetime import datetime
-from gensim.models import LdaModel, LdaMulticore, CoherenceModel
-from gensim.corpora import Dictionary
-from scipy.spatial.distance import pdist, squareform
-from scipy.cluster.hierarchy import linkage, dendrogram
-from scipy.stats import entropy
-from collections import OrderedDict
 from ._math_driver import hellinger, diffuse_distribution, rescale_parameter
-from ._topic_model_driver import setup_author_probs_matrix, find_max_min_cut_distance
+from ._topic_model_driver import setup_author_probs_matrix, find_max_min_cut_distance, expand_doc_topic_distns, compute_author_barycenters
 from .fast_encode_tree import fast_encode_tree_structure
-from ._file_driver import get_date_hour_minute, log_print
-from scipy.cluster.hierarchy import fcluster
-from sklearn.manifold import TSNE
+
 
 """============================================================================
 Abstract Base Classes for Modular MSTML Components
 ============================================================================"""
-
 class UnitTopicModel(ABC):
     """
     Abstract base class for topic models used in temporal ensemble.
@@ -244,7 +249,6 @@ class LowDimEmbedding(ABC):
 """============================================================================
 Concrete Implementations of Default MSTML Components
 ============================================================================"""
-
 class LDATopicModel(UnitTopicModel):
     """
     LDA topic model implementation using Gensim.
@@ -591,7 +595,6 @@ class PHATEEmbedding(LowDimEmbedding):
 """============================================================================
 Factory Methods for Creating Model Instances
 ============================================================================"""
-
 def create_topic_model(model_type: str = 'LDA', **kwargs) -> UnitTopicModel:
     """
     Factory function to create topic model instances.
@@ -648,6 +651,7 @@ def create_phate_embedding(*args, **kwargs):
     """Backwards compatibility alias for create_topic_embedding."""
     # This would be implemented at the orchestrator level
     pass
+
 
 """============================================================================
 class MstmlOrchestrator
@@ -722,32 +726,6 @@ class MstmlOrchestrator:
             author_disambiguator: Pre-configured AuthorDisambiguator instance, created with defaults if None
             config: Configuration dictionary for model parameters
             logger: Custom logger, creates default if None
-            
-        Example:
-            # Basic usage with defaults
-            orchestrator = MstmlOrchestrator("my_dataset")
-            
-            # Custom experiment directory
-            orchestrator = MstmlOrchestrator(
-                dataset_name="arxiv",
-                experiment_name="topic_analysis",
-                experiment_directory="/path/to/analysis"
-            )
-            
-            # Pre-configured components for advanced users
-            
-            # Configure DataLoader with date filtering
-            data_loader = JsonDataLoader.with_config({
-                'data_filters': {
-                    'date_range': {'start': '2020-01-01', 'end': '2023-12-31'},
-                    'categories': ['cs.AI', 'cs.LG']
-                }
-            })
-            
-            orchestrator = MstmlOrchestrator(
-                dataset_name="arxiv", 
-                data_loader=data_loader
-            )
         """
         # Core configuration
         self.dataset_name = dataset_name
@@ -802,7 +780,7 @@ class MstmlOrchestrator:
         self.time_chunks = []
         self.chunk_topic_models = []
         self.chunk_topics = []
-        self.smoothing_decay = self.config.get('temporal', {}).get('smoothing_decay', 0.75)
+        self.gamma_temporal_decay = self.config.get('temporal', {}).get('smoothing_decay', 0.75)
         
         # Modular components (dependency injection)
         self.topic_model_factory = create_topic_model
@@ -820,16 +798,11 @@ class MstmlOrchestrator:
         self.internal_node_probabilities = {}
         self.topic_embedding = None
         
-        # Author representation components
-        self.author_topic_distributions = None  # psi(u) vectors
-        self.author_embeddings = None
+        # Author/document representations
+        self.author_ct_distns = {}  # psi(u) vectors
+        self.document_ct_distns = {}
         self.interdisciplinarity_scores = {}
-        
-        # Analysis results
-        self.topic_trajectories = []
-        self.community_drift_analysis = {}
-        self.link_predictions = {}
-        
+
         # Visualization components
         self.embed_params = {}
         self.embed_figure = None
@@ -1501,7 +1474,6 @@ class MstmlOrchestrator:
             dst_path = os.path.join(self.experiment_directory, filename)
             
             if os.path.exists(src_path):
-                import shutil
                 shutil.copy2(src_path, dst_path)
                 copied_files.append(filename)
             else:
@@ -1836,6 +1808,7 @@ class MstmlOrchestrator:
     
     def create_temporal_chunks(self, 
                              months_per_chunk: int = 6,
+                             temporal_smoothing_decay: Optional[float] = None,
                              save_statistics: bool = True,
                              create_plot: bool = True,
                              save_plot: bool = True) -> 'MstmlOrchestrator':
@@ -1844,6 +1817,7 @@ class MstmlOrchestrator:
         
         Args:
             months_per_chunk: Number of months per temporal chunk
+            temporal_smoothing_decay: Exponential decay factor for temporal smoothing (0-1), overrides config if provided
             save_statistics: Whether to save chunk statistics to file
             create_plot: Whether to create a visualization of chunk sizes
             save_plot: Whether to save the plot to file
@@ -1855,6 +1829,13 @@ class MstmlOrchestrator:
             raise ValueError("No documents loaded. Call load_data() first.")
         
         self.logger.info(f"Creating temporal chunks with {months_per_chunk} months per chunk")
+        
+        # Update temporal smoothing decay if provided
+        if temporal_smoothing_decay is not None:
+            if not (0 < temporal_smoothing_decay < 1):
+                raise ValueError(f"temporal_smoothing_decay must be in (0,1), got {temporal_smoothing_decay}")
+            self.config['temporal']['smoothing_decay'] = temporal_smoothing_decay
+            self.logger.info(f"Updated temporal smoothing decay to {temporal_smoothing_decay}")
         
         # Ensure date column is datetime
         if 'date' not in self.documents_df.columns:
@@ -1969,91 +1950,97 @@ class MstmlOrchestrator:
         
         plt.show()
     
-    def apply_temporal_smoothing(self,
-                               decay_parameter: float = 0.75) -> 'MstmlOrchestrator':
+    def _apply_temporal_smoothing(self) -> 'MstmlOrchestrator':
         """
-        Apply exponential decay smoothing across temporal chunks.
+        Apply gamma-weighted temporal smoothing across chunks with random sampling.
         
-        Uses exponential weights w_t = γ^|τ-t| for subsampling documents
-        across time chunks to ensure topic continuity.
-        
-        Args:
-            decay_parameter: Exponential decay factor γ ∈ (0,1)
+        Implements the reference algorithm: for each chunk, includes all base documents
+        plus gamma-weighted random samples from other chunks based on temporal distance.
+        Uses smoothing_decay parameter from configuration.
         
         Returns:
             Self for method chaining
         """
-        
         if not self.time_chunks:
             raise ValueError("No temporal chunks created. Call create_temporal_chunks() first.")
         
-        if not (0 < decay_parameter < 1):
-            raise ValueError(f"Decay parameter must be in (0,1), got {decay_parameter}")
+        # Get smoothing decay from configuration
+        smoothing_decay = self.config['temporal']['gamma_temporal_decay']
         
-        self.smoothing_decay = decay_parameter
-        self.logger.info(f"Applying temporal smoothing with γ={decay_parameter}")
+        if not (0 < smoothing_decay < 1):
+            raise ValueError(f"Smoothing decay parameter must be in (0,1), got {smoothing_decay}")
         
-        # Create smoothed document assignments for each chunk
+        self.gamma_temporal_decay = smoothing_decay
+        log_print(f"Applying temporal smoothing with decay γ={smoothing_decay}", level="info", logger=self.logger)
+        
+        # Create indices mapping as in reference
+        chunk_list = list(range(len(self.time_chunks)))
+        inds_by_chunk = {}
+        
+        for chunk_idx, chunk in enumerate(self.time_chunks):
+            inds_by_chunk[chunk_idx] = list(chunk['document_indices'])
+        
+        # Apply gamma-weighted smoothing (following reference implementation)
+        slice_df_inds = {}
         smoothed_chunks = []
         
-        for target_chunk_idx, target_chunk in enumerate(self.time_chunks):
-            # Start with documents in the target chunk
-            weighted_docs = []
+        for c_base in chunk_list:
+            # Base chunk indices (always included fully)
+            c_base_data_words_idx = set(inds_by_chunk[c_base])
+            c_offset_data_words_idx = set()
             
-            # Calculate weights for documents in all chunks
-            for source_chunk_idx, source_chunk in enumerate(self.time_chunks):
-                # Calculate temporal distance
-                time_distance = abs(target_chunk_idx - source_chunk_idx)
-                weight = decay_parameter ** time_distance
+            # Sample from other chunks with gamma weighting
+            for c_offset in chunk_list:
+                if c_offset == c_base:
+                    continue
+                    
+                # Calculate weight based on temporal distance (as in reference)
+                weight = np.float32(smoothing_decay ** abs(c_offset - c_base))
                 
-                # Add weighted documents from this source chunk
-                for doc_idx in source_chunk['document_indices']:
-                    weighted_docs.append({
-                        'document_index': doc_idx,
-                        'weight': weight,
-                        'source_chunk': source_chunk_idx
-                    })
+                # Random sample with decay-proportional size (as in reference)
+                offset_chunk_size = len(inds_by_chunk[c_offset])
+                sample_size = int(weight * offset_chunk_size)
+                
+                if sample_size > 0 and offset_chunk_size > 0:
+                    rsamp = random.sample(list(inds_by_chunk[c_offset]), 
+                                        min(sample_size, offset_chunk_size))
+                    c_offset_data_words_idx.update(rsamp)
             
-            # Sort by weight (descending) to prioritize recent documents
-            weighted_docs.sort(key=lambda x: x['weight'], reverse=True)
-            
-            # Determine how many documents to include based on original chunk size
-            original_size = target_chunk['num_documents']
-            
-            # Include documents until we reach target size or weights become too small
-            min_weight_threshold = 0.01  # Minimum weight to include document
-            smoothed_doc_indices = []
-            total_weight = 0.0
-            
-            for doc_info in weighted_docs:
-                if (len(smoothed_doc_indices) < original_size * 2 and  # Don't exceed 2x original size
-                    doc_info['weight'] >= min_weight_threshold):
-                    smoothed_doc_indices.append(doc_info['document_index'])
-                    total_weight += doc_info['weight']
+            # Combine base and offset indices (as in reference)
+            s_data_words_idx = np.concatenate((list(c_base_data_words_idx), 
+                                             list(c_offset_data_words_idx)))
+            slice_df_inds[c_base] = s_data_words_idx
             
             # Create smoothed chunk info
+            original_chunk = self.time_chunks[c_base]
             smoothed_chunk = {
-                'chunk_id': target_chunk['chunk_id'],
-                'start_date': target_chunk['start_date'],
-                'end_date': target_chunk['end_date'],
-                'document_indices': smoothed_doc_indices,
-                'num_documents': len(smoothed_doc_indices),
-                'original_num_documents': original_size,
-                'total_weight': total_weight,
-                'decay_parameter': decay_parameter
+                'chunk_id': original_chunk['chunk_id'],
+                'start_date': original_chunk['start_date'],
+                'end_date': original_chunk['end_date'],
+                'document_indices': list(s_data_words_idx),
+                'num_documents': len(s_data_words_idx),
+                'original_num_documents': len(c_base_data_words_idx),
+                'base_documents': len(c_base_data_words_idx),
+                'sampled_documents': len(c_offset_data_words_idx),
+                'gamma_temporal_decay': smoothing_decay
             }
             smoothed_chunks.append(smoothed_chunk)
         
         # Update time chunks with smoothed versions
         self.time_chunks = smoothed_chunks
+        self.slice_df_indices = slice_df_inds  # Store for corpus recreation
         
         # Log smoothing statistics
-        original_sizes = [chunk['original_num_documents'] for chunk in self.time_chunks]
-        smoothed_sizes = [chunk['num_documents'] for chunk in self.time_chunks]
+        base_sizes = [chunk['base_documents'] for chunk in self.time_chunks]
+        total_sizes = [chunk['num_documents'] for chunk in self.time_chunks]
+        sampled_sizes = [chunk['sampled_documents'] for chunk in self.time_chunks]
         
-        self.logger.info(
-            f"Temporal smoothing complete. Average chunk size: "
-            f"{np.mean(original_sizes):.1f} -> {np.mean(smoothed_sizes):.1f}"
+        log_print(
+            f"Temporal smoothing complete. Average sizes: "
+            f"base={np.mean(base_sizes):.1f}, "
+            f"sampled={np.mean(sampled_sizes):.1f}, "
+            f"total={np.mean(total_sizes):.1f}",
+            level="info", logger=self.logger
         )
         
         return self
@@ -2086,6 +2073,9 @@ class MstmlOrchestrator:
         
         self.logger.info(f"Training {base_model} ensemble models")
         
+        # Apply temporal smoothing before training models
+        self._apply_temporal_smoothing()
+        
         # Set default model parameters
         if model_params is None:
             model_params = self.config['topic_model']['params'].get(base_model.lower(), {})
@@ -2096,24 +2086,20 @@ class MstmlOrchestrator:
         for chunk_idx, chunk_info in enumerate(self.time_chunks):
             chunk_doc_indices = chunk_info['document_indices']
 
-            # Create chunk-specific BOW corpus for LDA training
-            # Map original dataframe indices to preprocessed corpus indices
-            valid_indices = []
-            chunk_bow_corpus = []
-            for original_idx in chunk_doc_indices:
-                try:
-                    # Find the position of this document in the current dataframe
-                    if original_idx in self.documents_df.index:
-                        # Get the position in the current dataframe (which corresponds to bow_corpus index)
-                        corpus_idx = self.documents_df.index.get_loc(original_idx)
-                        if corpus_idx < len(self.bow_corpus):
-                            chunk_bow_corpus.append(self.bow_corpus[corpus_idx])
-                            valid_indices.append(original_idx)
-                except (KeyError, IndexError) as e:
-                    self.logger.warning(f"Skipping document at index {original_idx}: {e}")
+            # Create chunk-specific BOW corpus following reference implementation
+            # Get preprocessed text for all documents in this chunk (including smoothed)
+            chunk_df = self.documents_df.iloc[chunk_doc_indices]
+            
+            # Extract preprocessed text and create BOW corpus (as in reference)
+            preprocessed_col = MainDataSchema.PREPROCESSED_TEXT.colname
+            s_data_words = chunk_df[preprocessed_col].tolist()
+            
+            # Create BOW corpus for this chunk using the dictionary (as in reference)
+            chunk_bow_corpus = [self.id2word.doc2bow(text) for text in s_data_words]
+            valid_indices = list(chunk_doc_indices)
             
             if not chunk_bow_corpus:
-                self.logger.warning(f"No valid documents found for chunk {chunk_idx + 1}")
+                log_print(f"No valid documents found for chunk {chunk_idx + 1}", level="warning", logger=self.logger)
                 continue
             
             # Update chunk size to reflect actual valid documents
@@ -2144,7 +2130,7 @@ class MstmlOrchestrator:
                         corpus=chunk_bow_corpus,
                         id2word=self.vocabulary,
                         num_topics=k_topics,
-                        passes=model_params.get('passes', 10),
+                        passes=model_params.get('passes', 5),
                         iterations=model_params.get('iterations', 50),
                         random_state=42,
                         alpha=alpha_param,
@@ -2156,7 +2142,7 @@ class MstmlOrchestrator:
                         corpus=chunk_bow_corpus,
                         id2word=self.vocabulary,
                         num_topics=k_topics,
-                        passes=model_params.get('passes', 10),
+                        passes=model_params.get('passes', 5),
                         iterations=model_params.get('iterations', 50),
                         random_state=42,
                         alpha=alpha_param,
@@ -2224,7 +2210,121 @@ class MstmlOrchestrator:
             f"average perplexity: {avg_perplexity:.2f} (lower is better)"
         )
         
+        # Build the document-topic distribution and author processing pipeline
+        self._build_author_document_distributions()
+        
         return self
+    
+    def _build_author_document_distributions(self) -> None:
+        """
+        Build document-topic and author-topic distributions with diffusion processing.
+        
+        This implements the core document → expanded → author → diffusion pipeline:
+        1. Collect document-topic distributions from all chunk models
+        2. Expand distributions to full chunk topic space
+        3. Compute author barycenters with inverse author count weighting
+        4. Create diffusion KNN graph and apply diffusion process
+        """
+        self.logger.info("Building author-document distribution pipeline")
+        
+        # Step 1: Collect document-topic distributions from chunk models
+        doc_topic_distns = {}
+        inds_by_chunk = {}
+        ntopics_by_chunk = {}
+        
+        for model_info in self.chunk_topic_models:
+            chunk_id = model_info['chunk_id'] 
+            doc_indices = model_info['document_indices']
+            doc_topic_matrix = model_info['document_topic_distributions']
+            
+            inds_by_chunk[chunk_id] = doc_indices
+            ntopics_by_chunk[chunk_id] = model_info['num_topics']
+            
+            # Map document indices to their topic distributions
+            for i, doc_idx in enumerate(doc_indices):
+                doc_topic_distns[doc_idx] = doc_topic_matrix[i]
+        
+        # Step 2: Expand document-topic distributions to full chunk topic space
+        self.logger.info("Expanding document-topic distributions to full chunk topic space")
+        num_chunks = len(self.chunk_topic_models)
+        
+        self.expanded_doc_topic_distns = expand_doc_topic_distns(
+            doc_topic_distns, inds_by_chunk, num_chunks, ntopics_by_chunk
+        )
+        
+        # Step 3: Compute author barycenters
+        self.logger.info("Computing author barycenters with inverse author count weighting")
+        author_column = MainDataSchema.AUTHORS.colname
+        
+        self.author_topic_barycenters, self.authId_to_docs, self.authId2docweights = compute_author_barycenters(
+            self.expanded_doc_topic_distns, self.documents_df, author_column
+        )
+        
+        # Step 4: Create diffusion KNN graph and apply diffusion
+        self._create_diffusion_knn_graph()
+        
+        self.logger.info(
+            f"Author-document pipeline complete: "
+            f"{len(self.expanded_doc_topic_distns)} documents, "
+            f"{len(self.author_topic_barycenters)} authors, "
+            f"diffusion applied with {self.config['author_doc_embeddings']['']} neighbors"
+        )
+    
+    def _create_diffusion_knn_graph(self) -> None:
+        """
+        Create KNN graph for chunk topic diffusion and apply diffusion process.
+        Uses the small KNN parameter for local diffusion of author/document distributions.
+        """
+        
+        diffusion_knnk = self.config['temporal']['chunk_topic_diffusion_knnk']
+        self.logger.info(f"Creating diffusion KNN graph with k={diffusion_knnk}")
+        
+        # Use topic vectors (chunk_topic_wfs) for KNN graph construction
+        if self.topic_vectors is None:
+            raise ValueError("Topic vectors not available for KNN graph construction")
+        
+        # Apply sqrt transformation for Hellinger distance in FAISS
+        sqrt_topic_vectors = np.sqrt(self.topic_vectors).astype(np.float32)
+        
+        # Build FAISS index for KNN search
+        dimension = sqrt_topic_vectors.shape[1]
+        index = faiss.IndexFlatL2(dimension)
+        index.add(sqrt_topic_vectors)
+        
+        # Perform KNN search
+        distances, indices = index.search(sqrt_topic_vectors, diffusion_knnk + 1)  # +1 to include self
+        
+        # Normalize distances for Hellinger (divide by sqrt(2))
+        distances = distances / np.sqrt(2.0).astype(np.float32)
+        
+        # Construct NetworkX graph
+        self.knn_chunk_topic_graph = nx.Graph()
+        num_topics = len(self.topic_vectors)
+        
+        # Add all nodes
+        self.knn_chunk_topic_graph.add_nodes_from(range(num_topics))
+        
+        # Add edges (skip first index which is self)
+        for i in range(num_topics):
+            for j in range(1, diffusion_knnk + 1):  # Start from 1 to skip self
+                neighbor_idx = indices[i, j]
+                distance = float(distances[i, j])
+                self.knn_chunk_topic_graph.add_edge(i, neighbor_idx, weight=distance)
+        
+        # Apply diffusion to author and document distributions  
+        self.logger.info("Applying diffusion to author and document distributions")
+        
+        self.author_ct_distns = {}
+        for author_id, barycenter in self.author_topic_barycenters.items():
+            self.author_ct_distns[author_id] = diffuse_distribution(
+                self.knn_chunk_topic_graph, barycenter
+            )
+        
+        self.doc_ct_distns = {}
+        for doc_id, distribution in self.expanded_doc_topic_distns.items():
+            self.doc_ct_distns[doc_id] = diffuse_distribution(
+                self.knn_chunk_topic_graph, distribution
+            )
     
     # ========================================================================================
     # 4. TOPIC MANIFOLD LEARNING AND DENDROGRAM CONSTRUCTION
@@ -2232,14 +2332,16 @@ class MstmlOrchestrator:
     
     def build_topic_manifold(self,
                            distance_metric: str = 'hellinger',
-                           knn_neighbors: int = 10,
+                           knn_neighbors: Optional[int] = None,
                            use_faiss: bool = True) -> 'MstmlOrchestrator':
         """
         Build topic manifold using information-geometric distances.
         
+        Uses the large KNN parameter for manifold construction and hierarchical clustering.
+        
         Args:
             distance_metric: Distance metric ('hellinger', 'euclidean')
-            knn_neighbors: Number of nearest neighbors for graph construction
+            knn_neighbors: Number of nearest neighbors (uses config faiss_knnk_for_tpc_dendro if None)
             use_faiss: Use FAISS for fast approximate nearest neighbors
         
         Returns:
@@ -2249,7 +2351,11 @@ class MstmlOrchestrator:
         if self.topic_vectors is None:
             raise ValueError("No topic vectors available. Call train_ensemble_models() first.")
         
-        self.logger.info(f"Building topic manifold with {distance_metric} distance")
+        # Use config parameter if knn_neighbors not specified
+        if knn_neighbors is None:
+            knn_neighbors = self.config['temporal']['faiss_knnk_for_tpc_dendro']
+        
+        self.logger.info(f"Building topic manifold with {distance_metric} distance and k={knn_neighbors}")
         
         n_topics = len(self.topic_vectors)
         
@@ -2467,35 +2573,27 @@ class MstmlOrchestrator:
         return self
     
     def _create_enhanced_dendrogram(self):
-        """
-        Create enhanced dendrogram with link probabilities using fast_encode_tree_structure.
-        
-        This is critical for interdisciplinarity scoring as it associates left-right link 
-        probabilities to each dendrogram internal node based on co-author network and topic vectors.
-        """
+        """Create enhanced dendrogram with link probabilities using fast_encode_tree_structure."""
         if self.topic_dendrogram_linkage is None:
             raise ValueError("No linkage matrix available")
         
         # Check if we have required components for enhanced dendrogram
         if (self.coauthor_network is None or 
-            not hasattr(self, 'author_topic_distributions') or 
-            self.author_topic_distributions is None):
+            not hasattr(self, 'author_ct_distns') or 
+            self.author_ct_distns is None):
             
-            self.logger.warning(
-                "Co-author network or author topic distributions not available. "
-                "Enhanced dendrogram will be created when compute_author_embeddings() is called."
-            )
+            self.logger.warning("Co-author network or author distributions not available.")
             self.topic_dendrogram = None
             return
         
         try:
-            self.logger.info("Creating enhanced dendrogram with link probabilities using fast_encode_tree_structure")
+            self.logger.info("Creating enhanced dendrogram with link probabilities")
             
             # Call fast_encode_tree_structure with the linkage matrix (Z), author distributions, and network
             encoded_root, author_index_map = fast_encode_tree_structure(
-                self.topic_dendrogram_linkage,  # Z matrix from scipy.linkage
-                self.author_topic_distributions,  # Author-topic distributions
-                self.coauthor_network  # Co-author network graph
+                self.topic_dendrogram_linkage,
+                self.author_ct_distns,
+                self.coauthor_network
             )
             
             # Store the enhanced dendrogram and mapping
@@ -2506,12 +2604,12 @@ class MstmlOrchestrator:
             self.max_cut_distance, self.min_cut_distance = find_max_min_cut_distance(encoded_root)
             
             self.logger.info(
-                f"Enhanced dendrogram created with cut distance range "
+                f"Dendrogram created with cut distance range "
                 f"[{self.min_cut_distance:.3f}, {self.max_cut_distance:.3f}]"
             )
             
         except Exception as e:
-            self.logger.warning(f"Failed to create enhanced dendrogram: {e}")
+            self.logger.warning(f"Failed to create dendrogram: {e}")
             self.topic_dendrogram = None
     
     def estimate_node_probabilities(self,
@@ -2537,11 +2635,10 @@ class MstmlOrchestrator:
         
         self.logger.info("Estimating dendrogram node probabilities")
         
-        # Compute author-topic distributions if using author embeddings
+        # Ensure author distributions are available
         if use_author_embeddings:
-            if self.author_topic_distributions is None:
-                self.logger.info("Computing author embeddings for HRG estimation")
-                self.compute_author_embeddings(apply_diffusion=False)
+            if not hasattr(self, 'author_ct_distns') or self.author_ct_distns is None:
+                raise ValueError("No author distributions available. Call train_ensemble_models() first.")
         
         # Encode tree structure for fast probability computation
         # Create author index mapping
@@ -2553,7 +2650,7 @@ class MstmlOrchestrator:
         try:
             encoded_root, _ = fast_encode_tree_structure(
                 self.topic_dendrogram_linkage, 
-                self.author_topic_distributions or {},
+                self.author_ct_distns or {},
                 self.coauthor_network
             )
             
@@ -2644,144 +2741,6 @@ class MstmlOrchestrator:
     # 5. AUTHOR REPRESENTATION LEARNING
     # ========================================================================================
     
-    def compute_author_embeddings(self,
-                                weighting_scheme: str = 'inverse_coauthors',
-                                apply_diffusion: bool = True,
-                                diffusion_steps: int = 1) -> 'MstmlOrchestrator':
-        """
-        Compute author embeddings in topic space.
-        
-        Creates author-topic barycenters: ξ(u) = Σ (1/|V(j)|) θ(j)
-        for author u across their documents C(u).
-        
-        Args:
-            weighting_scheme: Document weighting ('inverse_coauthors', 'uniform')
-            apply_diffusion: Apply diffusion process to redistribute probability mass
-            diffusion_steps: Number of diffusion steps on topic k-NN graph
-        
-        Returns:
-            Self for method chaining
-        """
-        
-        if not self.chunk_topic_models:
-            raise ValueError("No topic models available. Call train_ensemble_models() first.")
-        
-        if self.coauthor_network is None:
-            raise ValueError("No co-author network available. Call setup_coauthor_network() first.")
-        
-        self.logger.info("Computing author embeddings in topic space")
-        
-        # Initialize author embeddings
-        total_topics = len(self.topic_vectors)
-        self.author_topic_distributions = {}
-        
-        # Create mapping from document index to chunk topic distributions
-        doc_to_topics = {}
-        
-        for chunk_model in self.chunk_topic_models:
-            chunk_id = chunk_model['chunk_id']
-            doc_indices = chunk_model['document_indices']
-            doc_topic_distributions = chunk_model['document_topic_distributions']
-            
-            for local_doc_idx, global_doc_idx in enumerate(doc_indices):
-                # Map to global topic indices
-                global_topic_dist = np.zeros(total_topics)
-                
-                # Find where this chunk's topics start in the global index
-                topic_offset = sum(
-                    model['num_topics'] for model in self.chunk_topic_models[:chunk_id]
-                )
-                
-                # Copy chunk topic distribution to correct global positions
-                chunk_num_topics = chunk_model['num_topics']
-                global_topic_dist[topic_offset:topic_offset + chunk_num_topics] = doc_topic_distributions[local_doc_idx]
-                
-                doc_to_topics[global_doc_idx] = global_topic_dist
-        
-        # Compute author embeddings
-        for author_id in self.coauthor_network.nodes():
-            author_documents = self.coauthor_network.nodes[author_id].get('documents', [])
-            
-            if not author_documents:
-                # Author with no documents gets uniform distribution
-                self.author_topic_distributions[author_id] = np.ones(total_topics) / total_topics
-                continue
-            
-            # Compute weighted average of document topic distributions
-            weighted_topics = np.zeros(total_topics)
-            total_weight = 0.0
-            
-            for doc_idx in author_documents:
-                if doc_idx not in doc_to_topics:
-                    continue  # Skip documents not in any temporal chunk
-                
-                doc_topic_dist = doc_to_topics[doc_idx]
-                
-                # Compute document weight based on weighting scheme
-                if weighting_scheme == 'inverse_coauthors':
-                    # Weight by inverse number of co-authors
-                    doc_authors = []
-                    for _, row in self.documents_df.iterrows():
-                        if _ == doc_idx:
-                            authors = row.get('authors', [])
-                            if isinstance(authors, str):
-                                authors = [authors]
-                            doc_authors = authors
-                            break
-                    
-                    weight = 1.0 / max(1, len(doc_authors))
-                    
-                elif weighting_scheme == 'uniform':
-                    weight = 1.0
-                    
-                else:
-                    raise ValueError(f"Unknown weighting scheme: {weighting_scheme}")
-                
-                weighted_topics += weight * doc_topic_dist
-                total_weight += weight
-            
-            # Normalize to create probability distribution
-            if total_weight > 0:
-                author_embedding = weighted_topics / total_weight
-            else:
-                author_embedding = np.ones(total_topics) / total_topics
-            
-            self.author_topic_distributions[author_id] = author_embedding
-        
-        # Apply diffusion process if requested
-        if apply_diffusion and self.topic_knn_graph is not None:
-            self.logger.info(f"Applying {diffusion_steps} diffusion steps")
-            
-            for author_id in self.author_topic_distributions:
-                initial_dist = self.author_topic_distributions[author_id]
-                
-                # Apply diffusion using topic kNN graph
-                diffused_dist = diffuse_distribution(
-                    self.topic_knn_graph,
-                    initial_dist,
-                    num_iterations=diffusion_steps
-                )
-                
-                self.author_topic_distributions[author_id] = diffused_dist
-        
-        # Create author embeddings matrix for easier access
-        author_ids = list(self.author_topic_distributions.keys())
-        self.author_embeddings = np.array([
-            self.author_topic_distributions[author_id] for author_id in author_ids
-        ])
-        
-        # Create enhanced dendrogram with link probabilities now that author distributions are available
-        if (hasattr(self, 'topic_dendrogram_linkage') and self.topic_dendrogram_linkage is not None and
-            self.coauthor_network is not None and not hasattr(self, 'topic_dendrogram')):
-            self.logger.info("Creating enhanced dendrogram with link probabilities")
-            self._create_enhanced_dendrogram()
-        
-        self.logger.info(
-            f"Computed embeddings for {len(self.author_topic_distributions)} authors "
-            f"in {total_topics}-dimensional topic space"
-        )
-        
-        return self
     
     def compute_interdisciplinarity_scores_docs(self,
                                               entropy_weighting: bool = True,
@@ -2802,55 +2761,36 @@ class MstmlOrchestrator:
             Self for method chaining
         """
         
-        if self.author_topic_distributions is None:
-            raise ValueError("No author embeddings available. Call compute_author_embeddings() first.")
+        if not hasattr(self, 'doc_ct_distns') or self.doc_ct_distns is None:
+            raise ValueError("No document diffused distributions available. Call train_ensemble_models() first.")
         
         self.logger.info(f"Computing interdisciplinarity scores for documents{' (top ' + str(topn) + ')' if topn else ''}")
         
         doc_scores = {}
         
-        for doc_idx, row in self.documents_df.iterrows():
-            authors = row.get('authors', [])
-            if isinstance(authors, str):
-                authors = [authors]
+        for doc_id in self.doc_ct_distns:
+            # Use the diffused document-topic distribution directly
+            doc_topic_dist = self.doc_ct_distns[doc_id]
             
-            if not authors:
-                doc_scores[doc_idx] = 0.0
-                continue
-            
-            # Extract author IDs
-            author_ids = []
-            for author in authors:
-                if isinstance(author, dict):
-                    author_id = author.get('id', author.get('name', str(author)))
-                else:
-                    author_id = str(author)
-                author_ids.append(author_id)
-            
-            # Compute document topic distribution from author contributions
-            doc_topic_dist = np.zeros(len(self.topic_vectors))
-            total_weight = 0.0
-            
-            for author_id in author_ids:
-                if author_id in self.author_topic_distributions:
-                    author_dist = self.author_topic_distributions[author_id]
-                    
-                    # Author weight
-                    if author_publication_weighting:
-                        # Weight by sqrt of publication count
-                        pub_count = self.coauthor_network.nodes[author_id].get('publication_count', 1)
-                        weight = np.sqrt(pub_count)
-                    else:
-                        weight = 1.0
-                    
-                    doc_topic_dist += weight * author_dist
-                    total_weight += weight
-            
-            # Normalize document topic distribution
-            if total_weight > 0:
-                doc_topic_dist /= total_weight
-            else:
-                doc_topic_dist = np.ones(len(self.topic_vectors)) / len(self.topic_vectors)
+            # Get document metadata for author weighting if needed
+            if doc_id in self.documents_df.index:
+                row = self.documents_df.loc[doc_id]
+                authors = row.get('authors', [])
+                if isinstance(authors, str):
+                    authors = [authors]
+                
+                # Calculate author publication weight if requested
+                author_weight_factor = 1.0
+                if author_publication_weighting and authors:
+                    total_pub_weight = 0.0
+                    for author in authors:
+                        author_id = str(author)
+                        if hasattr(self, 'coauthor_network') and self.coauthor_network and author_id in self.coauthor_network.nodes:
+                            pub_count = self.coauthor_network.nodes[author_id].get('publication_count', 1)
+                            total_pub_weight += np.sqrt(pub_count)
+                        else:
+                            total_pub_weight += 1.0
+                    author_weight_factor = total_pub_weight / len(authors) if len(authors) > 0 else 1.0
             
             # Compute interdisciplinarity score
             score = 0.0
@@ -2870,9 +2810,9 @@ class MstmlOrchestrator:
             
             # Weight by author publication mass if requested
             if author_publication_weighting:
-                score *= total_weight
+                score *= author_weight_factor
             
-            doc_scores[doc_idx] = score
+            doc_scores[doc_id] = score
         
         # Sort and potentially truncate results
         sorted_docs = OrderedDict(
@@ -2914,14 +2854,14 @@ class MstmlOrchestrator:
             Self for method chaining
         """
         
-        if self.author_topic_distributions is None:
-            raise ValueError("No author embeddings available. Call compute_author_embeddings() first.")
+        if not hasattr(self, 'author_ct_distns') or self.author_ct_distns is None:
+            raise ValueError("No author diffused distributions available. Call train_ensemble_models() first.")
         
         self.logger.info(f"Computing interdisciplinarity scores for authors{' (top ' + str(topn) + ')' if topn else ''}")
         
         author_scores = {}
         
-        for author_id, topic_dist in self.author_topic_distributions.items():
+        for author_id, topic_dist in self.author_ct_distns.items():
             # Filter to top topics if specified
             if top_topics_threshold > 0 and top_topics_threshold < len(topic_dist):
                 # Keep only top K topics, zero out the rest
@@ -2987,7 +2927,7 @@ class MstmlOrchestrator:
                              method: str = 'phate',
                              n_components: int = 3,
                              knn_neighbors: int = 5,
-                             gamma: float = 0,
+                             phate_gamma: float = 0,
                              t: str = "auto",
                              cut_height: float = 0.7,
                              distance_metric: str = 'hellinger',
@@ -3004,7 +2944,7 @@ class MstmlOrchestrator:
             method: Embedding method ('phate', 'pca', 'umap', 'tsne')
             n_components: Number of embedding dimensions (2 or 3)
             knn_neighbors: Number of nearest neighbors for PHATE/UMAP
-            gamma: PHATE gamma parameter for kernel bandwidth (0 = auto)
+            phate_gamma: PHATE gamma parameter for kernel bandwidth (0 = auto)
             t: Number of diffusion steps for PHATE ('auto' or integer)
             cut_height: Dendrogram cut height for meta-topic clustering (0-1 range)
             distance_metric: Distance metric ('hellinger', 'euclidean', 'cosine')
@@ -3080,7 +3020,7 @@ class MstmlOrchestrator:
                     phate_op = phate.PHATE(
                         n_components=n_components,
                         knn=knn_neighbors,
-                        gamma=gamma,
+                        gamma=phate_gamma,
                         t=t,
                         knn_dist='precomputed',
                         random_state=42,
@@ -3104,7 +3044,7 @@ class MstmlOrchestrator:
                     phate_op = phate.PHATE(
                         n_components=n_components,
                         knn=knn_neighbors,
-                        gamma=gamma,
+                        gamma=phate_gamma,
                         t=t,
                         metric=metric_name,
                         random_state=42,
@@ -3125,7 +3065,6 @@ class MstmlOrchestrator:
         elif method_lower == 'umap':
             # UMAP embedding
             try:
-                import umap
                 
                 # Validate distance metric for UMAP
                 metric_name = distance_metric.lower()
@@ -3248,7 +3187,7 @@ class MstmlOrchestrator:
             'method': method_lower.upper(),
             'n_components': n_components,
             'knn_neighbors': knn_neighbors,
-            'gamma': gamma,
+            'phate_gamma': phate_gamma,
             't': t,
             'cut_height': cut_height,
             'distance_metric': distance_metric,
@@ -3269,7 +3208,6 @@ class MstmlOrchestrator:
         Backward compatibility method for create_phate_embedding.
         Calls create_topic_embedding with method='phate'.
         """
-        import warnings
         warnings.warn(
             "create_phate_embedding is deprecated. Use create_topic_embedding(method='phate') instead.",
             DeprecationWarning,
@@ -3872,14 +3810,14 @@ class MstmlOrchestrator:
                     json.dump(self.topic_embedding.tolist(), f, indent=2)
         
         # Export author embeddings if available
-        if self.author_topic_distributions is not None:
+        if hasattr(self, 'author_ct_distns') and self.author_ct_distns is not None:
             if 'pkl' in formats:
-                write_pickle(os.path.join(output_directory, 'author_embeddings.pkl'), self.author_topic_distributions)
+                write_pickle(os.path.join(output_directory, 'author_embeddings.pkl'), self.author_ct_distns)
             if 'json' in formats:
                 # Convert numpy arrays to lists for JSON serialization
                 json_embeddings = {
                     author: embedding.tolist() if hasattr(embedding, 'tolist') else embedding
-                    for author, embedding in self.author_topic_distributions.items()
+                    for author, embedding in self.author_ct_distns.items()
                 }
                 with open(os.path.join(output_directory, 'author_embeddings.json'), 'w') as f:
                     json.dump(json_embeddings, f, indent=2)
@@ -3915,7 +3853,7 @@ class MstmlOrchestrator:
             'analysis_components': {
                 'has_topic_vectors': self.topic_vectors is not None,
                 'has_topic_embedding': self.topic_embedding is not None,
-                'has_author_embeddings': self.author_topic_distributions is not None,
+                'has_author_embeddings': hasattr(self, 'author_ct_distns') and self.author_ct_distns is not None,
                 'has_interdisciplinarity_scores': bool(self.interdisciplinarity_scores),
                 'num_time_chunks': len(self.time_chunks),
                 'coauthor_network_nodes': self.coauthor_network.number_of_nodes() if self.coauthor_network else 0,
@@ -3965,10 +3903,7 @@ class MstmlOrchestrator:
         return {
             # Temporal Analysis Configuration
             'temporal': {
-                'smoothing_decay': 0.75,
-                'time_window_strategy': 'sliding',  # 'sliding', 'fixed', 'adaptive'
-                'min_docs_per_window': 10,
-                'temporal_alignment_method': 'linear'
+                'gamma_temporal_decay': 0.75,
             },
             
             # Topic Model Configuration  
@@ -3979,8 +3914,8 @@ class MstmlOrchestrator:
                     'lda': {
                         'alpha': 'symmetric',
                         'eta': None,
-                        'passes': 10,
-                        'iterations': 50,
+                        'npasses': 5,
+                        'ngibbs': 50,
                         'num_topics': 'auto',
                         'random_state': 42
                     },
@@ -4014,7 +3949,7 @@ class MstmlOrchestrator:
             },
             
             # Embedding Configuration
-            'embedding': {
+            'topic_embedding': {
                 'type': 'PHATE',  # 'PHATE', 'UMAP', 'TSNE'
                 'params': {
                     'phate': {
@@ -4040,11 +3975,17 @@ class MstmlOrchestrator:
                     }
                 }
             },
+
+            'author_doc_embeddings': {
+                'author_topic_barycenters': True,  #  Weight author distns by reciprocal of number of co-authors per doc
+                'ct_distn_diffusion_knnk': 5,  #  Small KNN for author distribution diffusion
+                'num_diffusion_iterations': 1,  #  Message passing iterations for diffusing author distributions
+                'diffusion_rate': 0.7,  #  Strength of influence between neighbors during each msg passing iteration [0, 1]
+            },
             
-            # Mesoscale Configuration (kNN graph construction)
-            'kNN_params': {
-                'local_knn': 5,
-                'meso_knn': 50,
+            # Mesoscale Configuration
+            'mesoscale_filtering': {
+                'knnk_for_tpc_dendro': 100,  # Large KNN for topic manifold/dendrogram construction
                 'faiss_acceleration': {
                     'enabled': False,  # Enable FAISS for large datasets
                     'index_type': 'IndexFlatL2',  # 'IndexFlatL2', 'IndexIVFFlat', 'IndexHNSW'
@@ -4063,9 +4004,8 @@ class MstmlOrchestrator:
             # Analysis Configuration
             'analysis': {
                 'term_relevancy': {
-                    'lambda': 0.4,
-                    'top_terms': 10,
-                    'use_contrastive': False
+                    'lambda': 0.6,
+                    'top_terms': 2000,
                 },
                 'interdisciplinarity': {
                     'top_topics': 5,
@@ -4105,7 +4045,7 @@ class MstmlOrchestrator:
                 'progress_bars': True,
                 'save_intermediate_results': False,
                 'export_formats': ['json', 'csv', 'pkl'],
-                'figure_format': 'png',  # 'png', 'pdf', 'svg'
+                'figure_format': 'pdf',  # 'png', 'pdf', 'svg'
                 'figure_dpi': 300
             }
         }

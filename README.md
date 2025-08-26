@@ -61,7 +61,6 @@ orchestrator.setup_coauthor_network()
 orchestrator.create_temporal_chunks(months_per_chunk=6)
 orchestrator.train_ensemble_models()
 orchestrator.build_topic_manifold()
-orchestrator.compute_author_embeddings()
 
 # Compute interdisciplinarity scores
 orchestrator.compute_interdisciplinarity_scores_docs()
@@ -111,7 +110,6 @@ orchestrator.preprocess_text(
 
 # Advanced topic embedding and interdisciplinarity analysis
 orchestrator.build_topic_manifold()
-orchestrator.compute_author_embeddings()
 
 # Compute interdisciplinarity scores with custom parameters
 orchestrator.compute_interdisciplinarity_scores_docs(

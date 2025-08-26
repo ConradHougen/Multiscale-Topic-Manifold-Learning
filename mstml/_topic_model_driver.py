@@ -675,3 +675,75 @@ def get_top_percent(ranked_list, percent=5):
         return list(ranked_list.items())[:top_n]
     else:
         return ranked_list[:top_n]
+
+
+def compute_author_barycenters(expanded_doc_topic_distns, documents_df, author_column='authors'):
+    """
+    Compute author barycenters over chunk topics with inverse author count weighting.
+    
+    Authors are mapped to the barycenter of the documents they authored, where the "mass" 
+    for the barycenter calculation depends on the reciprocal of the number of authors per doc.
+    
+    Args:
+        expanded_doc_topic_distns: Dict of {doc_id: topic_distribution_array} over all chunk topics
+        documents_df: DataFrame with document metadata including author information
+        author_column: Column name containing author information
+        
+    Returns:
+        tuple: (author_topic_barycenters, authId_to_docs, authId2docweights)
+            - author_topic_barycenters: Dict of {author_id: barycenter_vector}  
+            - authId_to_docs: Dict mapping each author to list of doc_ids
+            - authId2docweights: Dict with structured array of doc weights per author
+    """
+    # Create mapping of authors to documents
+    authId_to_docs = defaultdict(list)
+    
+    for doc_id, row in documents_df.iterrows():
+        # Handle different author column formats
+        authors = row.get(author_column, [])
+        if isinstance(authors, str):
+            authors = [authors]  
+        elif authors is None:
+            continue
+            
+        for author_id in authors:
+            if author_id:  # Skip empty author IDs
+                authId_to_docs[author_id].append(doc_id)
+    
+    # Precompute author counts for faster weighting
+    author_counts = documents_df[author_column].apply(
+        lambda x: len(x) if isinstance(x, list) else (1 if x else 0)
+    ).to_numpy()
+    
+    # Compute barycenter distribution per author over topics
+    author_topic_barycenters = {}
+    authId2docweights = {}
+    
+    # Create the docs_weights data type with float32 for weights
+    docs_weights = [('doc_ids', int), ('weights', 'f4')]
+    
+    for author_id, doc_ids in authId_to_docs.items():
+        # Use precomputed author counts to avoid repeated df.loc calls
+        weights = np.array([1.0 / author_counts[doc_id] for doc_id in doc_ids], dtype=np.float32)
+        authId2docweights[author_id] = np.array(
+            [(doc_id, w) for doc_id, w in zip(doc_ids, weights)], dtype=docs_weights
+        )
+        
+        # Collect document topic vectors in advance 
+        doc_topic_vectors = []
+        valid_weights = []
+        
+        for i, doc_id in enumerate(doc_ids):
+            if doc_id in expanded_doc_topic_distns:
+                doc_topic_vectors.append(expanded_doc_topic_distns[doc_id])
+                valid_weights.append(weights[i])
+        
+        if doc_topic_vectors:
+            doc_topic_vectors = np.array(doc_topic_vectors, dtype=np.float32)
+            valid_weights = np.array(valid_weights, dtype=np.float32)
+            
+            # Calculate the weighted average for the author
+            auth_topic_vector = np.average(doc_topic_vectors, axis=0, weights=valid_weights)
+            author_topic_barycenters[author_id] = auth_topic_vector.astype(np.float32)
+    
+    return author_topic_barycenters, dict(authId_to_docs), authId2docweights
