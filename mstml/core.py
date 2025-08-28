@@ -2280,7 +2280,10 @@ class MstmlOrchestrator:
         
         total_topics = len(self.chunk_topics)
         avg_log_perplexity = np.mean([model['log_perplexity'] for model in self.chunk_topic_models])
-        avg_perplexity = np.mean([model['perplexity'] for model in self.chunk_topic_models])
+        
+        # Correct perplexity calculation: exp(-mean(log_perplexities))
+        # This is equivalent to geometric mean of individual perplexities
+        avg_perplexity = np.exp(-1.0 * avg_log_perplexity)
         
         self.logger.info(
             f"Ensemble training complete: {len(self.chunk_topic_models)} models, "
