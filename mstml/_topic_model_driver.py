@@ -710,10 +710,10 @@ def compute_author_barycenters(expanded_doc_topic_distns, documents_df, author_c
             if author_id:  # Skip empty author IDs
                 authId_to_docs[author_id].append(doc_id)
     
-    # Precompute author counts for faster weighting
+    # Precompute author counts for faster weighting - create Series indexed by doc_id
     author_counts = documents_df[author_column].apply(
         lambda x: len(x) if isinstance(x, list) else (1 if x else 0)
-    ).to_numpy()
+    )
     
     # Compute barycenter distribution per author over topics
     author_topic_barycenters = {}
@@ -724,7 +724,7 @@ def compute_author_barycenters(expanded_doc_topic_distns, documents_df, author_c
     
     for author_id, doc_ids in authId_to_docs.items():
         # Use precomputed author counts to avoid repeated df.loc calls
-        weights = np.array([1.0 / author_counts[doc_id] for doc_id in doc_ids], dtype=np.float32)
+        weights = np.array([1.0 / author_counts.loc[doc_id] for doc_id in doc_ids], dtype=np.float32)
         authId2docweights[author_id] = np.array(
             [(doc_id, w) for doc_id, w in zip(doc_ids, weights)], dtype=docs_weights
         )

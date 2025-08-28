@@ -14,3 +14,5 @@ wheel
 python-louvain
 notebook
 seaborn
+# FAISS (GPU-accelerated similarity search) - requires special handling in build.py
+faiss-gpu

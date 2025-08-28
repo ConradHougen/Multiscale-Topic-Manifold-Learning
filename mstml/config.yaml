@@ -1,0 +1,163 @@
+# MSTML Default Configuration
+# ===========================
+
+# Temporal Analysis Configuration
+temporal:
+  gamma_temporal_decay: 0.75
+  months_per_chunk: 6
+  save_statistics: true
+  create_plot: true
+  save_plot: true
+
+# Topic Model Configuration  
+topic_model:
+  type: LDA  # 'LDA', 'BERTopic', 'GPTopic'
+  docs_per_topic: 100  # For calculating number of topics per chunk
+  params:
+    # LDA-specific parameters (used when type='LDA')
+    lda:
+      alpha: symmetric # default
+      eta: symmetric # default
+      npasses: 5
+      ngibbs: 50
+      num_topics: auto
+      random_state: 42
+    # BERTopic parameters (used when type='BERTopic')  
+    bertopic:
+      embedding_model: all-MiniLM-L6-v2
+      umap_params:
+        n_neighbors: 15
+        min_dist: 0.1
+      hdbscan_params:
+        min_cluster_size: 10
+      min_topic_size: 10
+      calculate_probabilities: true
+    # GPT-based topic modeling parameters
+    gptopic:
+      model_name: gpt-3.5-turbo
+      max_tokens: 150
+      temperature: 0.3
+      num_keywords: 10
+
+# Distance Metric Configuration
+distance_metric:
+  type: hellinger  # 'hellinger', 'cosine', 'euclidean', 'jensen_shannon'
+  params:
+    hellinger: {}  # No additional params for Hellinger
+    cosine:
+      normalize: true
+    euclidean:
+      normalize: false
+    jensen_shannon:
+      base: 2
+
+# Topic Embedding Configuration
+topic_embedding:
+  type: PHATE  # 'PHATE', 'UMAP', 'TSNE'
+  params:
+    phate:
+      n_components: 2
+      knn: 5
+      decay: 40
+      gamma: 1.0
+      t: auto
+      random_state: 42
+    umap:
+      n_components: 2
+      n_neighbors: 15
+      min_dist: 0.1
+      metric: cosine
+      random_state: 42
+    tsne:
+      n_components: 2
+      perplexity: 30
+      learning_rate: 200
+      random_state: 42
+
+# Author and Document Embedding Configuration
+author_doc_embeddings:
+  author_topic_barycenters: true  # Weight author distns by reciprocal of number of co-authors per doc
+  ct_distn_diffusion_knnk: 5  # Small KNN for author distribution diffusion
+  num_diffusion_iterations: 1  # Message passing iterations for diffusing author distributions
+  diffusion_rate: 0.7  # Strength of influence between neighbors during each msg passing iteration [0, 1]
+
+# Mesoscale Configuration
+mesoscale_filtering:
+  knnk_for_tpc_dendro: 100  # Large KNN for topic manifold/dendrogram construction
+  faiss_acceleration:
+    enabled: false  # Enable FAISS for large datasets
+    index_type: IndexFlatL2  # 'IndexFlatL2', 'IndexIVFFlat', 'IndexHNSW'
+    min_vectors_for_faiss: 1000  # Use FAISS only for datasets larger than this
+
+# Hierarchical Clustering Configuration
+clustering:
+  linkage_method: ward  # 'ward', 'complete', 'average', 'single'
+  normalize_heights: true
+  distance_threshold: auto  # 'auto' or numeric value
+  min_cluster_size: 2
+
+# Co-author Network Configuration
+coauthor_network:
+  min_collaborations: 1
+  temporal: false
+  degree_limits: null  # [min_degree, max_degree] or null
+
+# Analysis Configuration
+analysis:
+  term_relevancy:
+    lambda: 0.6
+    top_terms: 2000
+  interdisciplinarity:
+    entropy_weighting: true
+    author_publication_weighting: true
+    publication_count_weighting: true
+    top_topics_threshold: 5
+    scoring_method: entropy  # 'entropy', 'gini', 'simpson'
+    aggregation_method: mean  # 'mean', 'max', 'weighted'
+  link_prediction:
+    anomaly_threshold: 0.1
+    prediction_method: hrg  # 'hrg', 'common_neighbors', 'jaccard'
+    validation_split: 0.2
+
+# Text Processing Configuration
+text_processing:
+  vocabulary_filtering:
+    low_thresh: 1  # Minimum document frequency threshold
+    high_frac: 0.995  # Maximum document frequency fraction
+  lda_relevancy:
+    train_lda: true  # Whether to train LDA model for relevancy filtering
+    num_topics: 50  # Number of topics for LDA model
+    lda_passes: 1  # Number of passes for LDA training
+
+# Processing Configuration
+processing:
+  multiprocessing:
+    enabled: true
+    n_jobs: -1  # -1 for all available cores
+    chunk_size: auto
+  memory_optimization:
+    use_float32: true  # Use float32 instead of float64 where possible
+    batch_processing: true
+    max_batch_size: 1000
+  caching:
+    enabled: true
+    cache_embeddings: true
+    cache_distance_matrices: true
+    cache_dir: .mstml_cache
+
+# Logging and Output Configuration
+output:
+  logging_level: INFO  # 'DEBUG', 'INFO', 'WARNING', 'ERROR'
+  progress_bars: true
+  save_intermediate_results: false
+  export_formats:
+    - json
+    - csv
+    - pkl
+  figure_format: pdf  # 'png', 'pdf', 'svg'
+  figure_dpi: 300
+  figure_size: [12, 14]
+  elevation: 25
+  azimuth: 60
+  show_colorbar: true
+  show_histogram: true

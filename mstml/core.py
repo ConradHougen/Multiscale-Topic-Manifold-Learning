@@ -14,11 +14,13 @@ import json  # For metadata
 import datetime as dt
 import pandas.api.types as ptypes
 import multiprocessing as mp
+import yaml
 import random
 import warnings
 import shutil
 import gensim
 import pickle
+import faiss
 import gensim.corpora as corpora
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -75,6 +77,46 @@ from ._graph_driver import (
 from ._math_driver import hellinger, diffuse_distribution, rescale_parameter
 from ._topic_model_driver import setup_author_probs_matrix, find_max_min_cut_distance, expand_doc_topic_distns, compute_author_barycenters
 from .fast_encode_tree import fast_encode_tree_structure
+
+
+"""============================================================================
+JSON Serialization Utilities
+============================================================================"""
+class NumpyEncoder(json.JSONEncoder):
+    """Custom JSON encoder for NumPy data types."""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        elif isinstance(obj, (np.complex64, np.complex128)):
+            return {'real': float(obj.real), 'imag': float(obj.imag)}
+        return super().default(obj)
+
+def safe_json_convert(obj):
+    """Recursively convert NumPy types to JSON-serializable types."""
+    if isinstance(obj, dict):
+        return {k: safe_json_convert(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [safe_json_convert(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return [safe_json_convert(item) for item in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif isinstance(obj, (np.complex64, np.complex128)):
+        return {'real': float(obj.real), 'imag': float(obj.imag)}
+    else:
+        return obj
 
 
 """============================================================================
@@ -258,15 +300,15 @@ class LDATopicModel(UnitTopicModel):
     and additional features compared to sklearn.
     """
     
-    def __init__(self, n_topics: int = 10, alpha: Union[str, float] = 'auto', 
-                 eta: Union[str, float] = 'auto', random_state: int = 42, 
-                 passes: int = 10, iterations: int = 50, **kwargs):
+    def __init__(self, n_topics: int = 10, alpha: Union[str, float] = 'symmetric', 
+                 eta: Union[str, float] = None, random_state: int = 42, 
+                 npasses: int = 5, ngibbs: int = 50, **kwargs):
         self.n_topics = n_topics
         self.alpha = alpha  # Document-topic density (higher = more topics per doc)
         self.eta = eta      # Topic-word density (higher = more words per topic) 
         self.random_state = random_state
-        self.passes = passes  # Number of passes through corpus during training
-        self.iterations = iterations  # Number of iterations per pass
+        self.npasses = npasses  # Number of passes through corpus during training
+        self.ngibbs = ngibbs  # Number of iterations per pass
         self.model = None
         self.dictionary = None
         self.corpus = None
@@ -303,8 +345,8 @@ class LDATopicModel(UnitTopicModel):
             alpha=self.alpha,
             eta=self.eta,
             random_state=self.random_state,
-            passes=self.passes,
-            iterations=self.iterations,
+            passes=self.npasses,
+            iterations=self.ngibbs,
             **self.kwargs
         )
         
@@ -349,8 +391,8 @@ class LDATopicModel(UnitTopicModel):
             'alpha': self.alpha,
             'eta': self.eta,
             'random_state': self.random_state,
-            'passes': self.passes,
-            'iterations': self.iterations,
+            'npasses': self.npasses,
+            'ngibbs': self.ngibbs,
             **self.kwargs
         }
     
@@ -780,7 +822,7 @@ class MstmlOrchestrator:
         self.time_chunks = []
         self.chunk_topic_models = []
         self.chunk_topics = []
-        self.gamma_temporal_decay = self.config.get('temporal', {}).get('smoothing_decay', 0.75)
+        self.gamma_temporal_decay = self.config.get('temporal', {}).get('gamma_temporal_decay', 0.75)
         
         # Modular components (dependency injection)
         self.topic_model_factory = create_topic_model
@@ -1051,8 +1093,8 @@ class MstmlOrchestrator:
         self.distance_metric = create_distance_metric(distance_type, **distance_params)
         
         # Initialize default embedding method
-        embedding_type = self.config['embedding']['type']
-        embedding_params = self.config['embedding'].get('params', {})
+        embedding_type = self.config['topic_embedding']['type']
+        embedding_params = self.config['topic_embedding'].get('params', {})
         self.embedding_method = create_embedding_method(embedding_type, **embedding_params)
         
         self.logger.info(f"Default components initialized: {distance_type} distance, {embedding_type} embedding")
@@ -1587,23 +1629,29 @@ class MstmlOrchestrator:
         return discovered_files
     
     def setup_coauthor_network(self, 
-                              min_collaborations: int = 1,
-                              temporal: bool = False,
+                              min_collaborations: Optional[int] = None,
+                              temporal: Optional[bool] = None,
                               degree_limits: Optional[tuple] = None) -> 'MstmlOrchestrator':
         """
         Create co-author network from loaded document data using _graph_driver functions.
         Authors should already be disambiguated from the load_data step.
         
         Args:
-            min_collaborations: Minimum collaborations to include edge
-            temporal: Whether to build temporal networks and compose them
-            degree_limits: Optional (min_degree, max_degree) tuple to filter nodes
+            min_collaborations: Minimum collaborations to include edge (overrides config)
+            temporal: Whether to build temporal networks and compose them (overrides config)
+            degree_limits: Optional (min_degree, max_degree) tuple to filter nodes (overrides config)
         
         Returns:
             Self for method chaining
         """
         if self.documents_df is None:
             raise ValueError("No documents loaded. Call load_data() first.")
+        
+        # Get config defaults and apply parameter overrides
+        network_config = self.config['coauthor_network']
+        min_collaborations = min_collaborations if min_collaborations is not None else network_config['min_collaborations']
+        temporal = temporal if temporal is not None else network_config['temporal']
+        degree_limits = degree_limits if degree_limits is not None else network_config['degree_limits']
         
         self.logger.info("Setting up co-author network using graph driver functions")
         
@@ -1696,33 +1744,49 @@ class MstmlOrchestrator:
     
     def preprocess_text(self,
                        allowed_categories: Optional[List[str]] = None,
-                       low_thresh: int = 1,
-                       high_frac: float = 0.995,
+                       low_thresh: Optional[int] = None,
+                       high_frac: Optional[float] = None,
                        extra_stopwords: Optional[List[str]] = None,
-                       train_lda: bool = True,
-                       num_topics: int = 50,
-                       lda_passes: int = 1,
-                       lambda_param: float = 0.6,
-                       top_n_terms: int = 2000) -> 'MstmlOrchestrator':
+                       train_lda: Optional[bool] = None,
+                       num_topics: Optional[int] = None,
+                       lda_passes: Optional[int] = None,
+                       lambda_param: Optional[float] = None,
+                       top_n_terms: Optional[int] = None) -> 'MstmlOrchestrator':
         """
         Apply comprehensive text preprocessing and vocabulary filtering using TextPreprocessor.
         
+        All parameters are optional and will use values from the configuration file if not provided.
+        
         Args:
             allowed_categories: List of allowed categories for filtering
-            low_thresh: Minimum document frequency threshold
-            high_frac: Maximum document frequency fraction
+            low_thresh: Minimum document frequency threshold (overrides config)
+            high_frac: Maximum document frequency fraction (overrides config)
             extra_stopwords: Additional stopwords to remove
-            train_lda: Whether to train LDA model for relevancy filtering
-            num_topics: Number of topics for LDA model
-            lda_passes: Number of passes for LDA training
-            lambda_param: Lambda parameter for relevancy scoring
-            top_n_terms: Number of top relevant terms to keep
+            train_lda: Whether to train LDA model for relevancy filtering (overrides config)
+            num_topics: Number of topics for LDA model (overrides config)
+            lda_passes: Number of passes for LDA training (overrides config)
+            lambda_param: Lambda parameter for relevancy scoring (overrides config)
+            top_n_terms: Number of top relevant terms to keep (overrides config)
         
         Returns:
             Self for method chaining
         """
         if self.documents_df is None:
             raise ValueError("No documents loaded. Call load_data() first.")
+        
+        # Get config defaults and apply parameter overrides
+        vocab_config = self.config['text_processing']['vocabulary_filtering']
+        lda_config = self.config['text_processing']['lda_relevancy']  
+        relevancy_config = self.config['analysis']['term_relevancy']
+        
+        # Apply config defaults or parameter overrides
+        low_thresh = low_thresh if low_thresh is not None else vocab_config['low_thresh']
+        high_frac = high_frac if high_frac is not None else vocab_config['high_frac']
+        train_lda = train_lda if train_lda is not None else lda_config['train_lda']
+        num_topics = num_topics if num_topics is not None else lda_config['num_topics']
+        lda_passes = lda_passes if lda_passes is not None else lda_config['lda_passes']
+        lambda_param = lambda_param if lambda_param is not None else relevancy_config['lambda']
+        top_n_terms = top_n_terms if top_n_terms is not None else relevancy_config['top_terms']
         
         # Track hyperparameters for this step
         step_params = {
@@ -1807,20 +1871,20 @@ class MstmlOrchestrator:
     # ========================================================================================
     
     def create_temporal_chunks(self, 
-                             months_per_chunk: int = 6,
+                             months_per_chunk: Optional[int] = None,
                              temporal_smoothing_decay: Optional[float] = None,
-                             save_statistics: bool = True,
-                             create_plot: bool = True,
-                             save_plot: bool = True) -> 'MstmlOrchestrator':
+                             save_statistics: Optional[bool] = None,
+                             create_plot: Optional[bool] = None,
+                             save_plot: Optional[bool] = None) -> 'MstmlOrchestrator':
         """
         Split corpus into temporal chunks for ensemble learning.
         
         Args:
-            months_per_chunk: Number of months per temporal chunk
+            months_per_chunk: Number of months per temporal chunk (overrides config)
             temporal_smoothing_decay: Exponential decay factor for temporal smoothing (0-1), overrides config if provided
-            save_statistics: Whether to save chunk statistics to file
-            create_plot: Whether to create a visualization of chunk sizes
-            save_plot: Whether to save the plot to file
+            save_statistics: Whether to save chunk statistics to file (overrides config)
+            create_plot: Whether to create a visualization of chunk sizes (overrides config)
+            save_plot: Whether to save the plot to file (overrides config)
         
         Returns:
             Self for method chaining
@@ -1828,13 +1892,20 @@ class MstmlOrchestrator:
         if self.documents_df is None:
             raise ValueError("No documents loaded. Call load_data() first.")
         
+        # Get config defaults and apply parameter overrides
+        temporal_config = self.config['temporal']
+        months_per_chunk = months_per_chunk if months_per_chunk is not None else temporal_config['months_per_chunk']
+        save_statistics = save_statistics if save_statistics is not None else temporal_config['save_statistics']
+        create_plot = create_plot if create_plot is not None else temporal_config['create_plot']
+        save_plot = save_plot if save_plot is not None else temporal_config['save_plot']
+        
         self.logger.info(f"Creating temporal chunks with {months_per_chunk} months per chunk")
         
         # Update temporal smoothing decay if provided
         if temporal_smoothing_decay is not None:
             if not (0 < temporal_smoothing_decay < 1):
                 raise ValueError(f"temporal_smoothing_decay must be in (0,1), got {temporal_smoothing_decay}")
-            self.config['temporal']['smoothing_decay'] = temporal_smoothing_decay
+            self.config['temporal']['gamma_temporal_decay'] = temporal_smoothing_decay
             self.logger.info(f"Updated temporal smoothing decay to {temporal_smoothing_decay}")
         
         # Ensure date column is datetime
@@ -2046,17 +2117,17 @@ class MstmlOrchestrator:
         return self
     
     def train_ensemble_models(self,
-                              base_model: str = 'LDA',
+                              base_model: Optional[str] = None,
                               topics_per_chunk: Optional[int] = None,
-                              docs_per_topic: int = 100,
+                              docs_per_topic: Optional[int] = None,
                               model_params: Optional[dict] = None) -> 'MstmlOrchestrator':
         """
         Train ensemble of topic models on temporal chunks.
         
         Args:
-            base_model: Base topic model type ('LDA', 'T-LDA', etc.)
+            base_model: Base topic model type ('LDA', 'T-LDA', etc.) (overrides config)
             topics_per_chunk: Number of topics per chunk model (overrides automatic calculation)
-            docs_per_topic: Target number of documents per topic for automatic calculation
+            docs_per_topic: Target number of documents per topic for automatic calculation (overrides config)
             model_params: Additional model parameters
         
         Returns:
@@ -2071,6 +2142,11 @@ class MstmlOrchestrator:
             self.bow_corpus is None):
             raise ValueError("No preprocessed corpus available. Call preprocess_text() first.")
         
+        # Get config defaults and apply parameter overrides
+        topic_config = self.config['topic_model']
+        base_model = base_model if base_model is not None else topic_config['type']
+        docs_per_topic = docs_per_topic if docs_per_topic is not None else topic_config['docs_per_topic']
+        
         self.logger.info(f"Training {base_model} ensemble models")
         
         # Apply temporal smoothing before training models
@@ -2078,7 +2154,8 @@ class MstmlOrchestrator:
         
         # Set default model parameters
         if model_params is None:
-            model_params = self.config['topic_model']['params'].get(base_model.lower(), {})
+            params_section = topic_config.get('params', {})
+            model_params = params_section.get(base_model.lower(), {})
         
         self.chunk_topic_models = []
         self.chunk_topics = []
@@ -2088,14 +2165,16 @@ class MstmlOrchestrator:
 
             # Create chunk-specific BOW corpus following reference implementation
             # Get preprocessed text for all documents in this chunk (including smoothed)
-            chunk_df = self.documents_df.iloc[chunk_doc_indices]
+            chunk_df = self.documents_df.loc[chunk_doc_indices]
             
             # Extract preprocessed text and create BOW corpus (as in reference)
             preprocessed_col = MainDataSchema.PREPROCESSED_TEXT.colname
             s_data_words = chunk_df[preprocessed_col].tolist()
             
             # Create BOW corpus for this chunk using the dictionary (as in reference)
-            chunk_bow_corpus = [self.id2word.doc2bow(text) for text in s_data_words]
+            if self.vocabulary is None:
+                raise AttributeError("vocabulary not initialized. Call preprocess_text() first.")
+            chunk_bow_corpus = [self.vocabulary.doc2bow(text) for text in s_data_words]
             valid_indices = list(chunk_doc_indices)
             
             if not chunk_bow_corpus:
@@ -2130,8 +2209,8 @@ class MstmlOrchestrator:
                         corpus=chunk_bow_corpus,
                         id2word=self.vocabulary,
                         num_topics=k_topics,
-                        passes=model_params.get('passes', 5),
-                        iterations=model_params.get('iterations', 50),
+                        passes=model_params.get('npasses', 5),
+                        iterations=model_params.get('ngibbs', 50),
                         random_state=42,
                         alpha=alpha_param,
                         eta=eta_param
@@ -2142,8 +2221,8 @@ class MstmlOrchestrator:
                         corpus=chunk_bow_corpus,
                         id2word=self.vocabulary,
                         num_topics=k_topics,
-                        passes=model_params.get('passes', 5),
-                        iterations=model_params.get('iterations', 50),
+                        passes=model_params.get('npasses', 5),
+                        iterations=model_params.get('ngibbs', 50),
                         random_state=42,
                         alpha=alpha_param,
                         eta=eta_param
@@ -2254,11 +2333,14 @@ class MstmlOrchestrator:
         
         # Step 3: Compute author barycenters
         self.logger.info("Computing author barycenters with inverse author count weighting")
-        author_column = MainDataSchema.AUTHORS.colname
+        author_column = MainDataSchema.AUTHOR_IDS.colname
         
         self.author_topic_barycenters, self.authId_to_docs, self.authId2docweights = compute_author_barycenters(
             self.expanded_doc_topic_distns, self.documents_df, author_column
         )
+        
+        if not self.author_topic_barycenters:
+            raise ValueError("No author barycenters computed. Check author data in documents_df.")
         
         # Step 4: Create diffusion KNN graph and apply diffusion
         self._create_diffusion_knn_graph()
@@ -2267,7 +2349,7 @@ class MstmlOrchestrator:
             f"Author-document pipeline complete: "
             f"{len(self.expanded_doc_topic_distns)} documents, "
             f"{len(self.author_topic_barycenters)} authors, "
-            f"diffusion applied with {self.config['author_doc_embeddings']['']} neighbors"
+            f"diffusion applied with {self.config['author_doc_embeddings']['ct_distn_diffusion_knnk']} neighbors"
         )
     
     def _create_diffusion_knn_graph(self) -> None:
@@ -2276,26 +2358,58 @@ class MstmlOrchestrator:
         Uses the small KNN parameter for local diffusion of author/document distributions.
         """
         
-        diffusion_knnk = self.config['temporal']['chunk_topic_diffusion_knnk']
+        diffusion_knnk = self.config['author_doc_embeddings']['ct_distn_diffusion_knnk']
         self.logger.info(f"Creating diffusion KNN graph with k={diffusion_knnk}")
         
         # Use topic vectors (chunk_topic_wfs) for KNN graph construction
         if self.topic_vectors is None:
             raise ValueError("Topic vectors not available for KNN graph construction")
         
-        # Apply sqrt transformation for Hellinger distance in FAISS
-        sqrt_topic_vectors = np.sqrt(self.topic_vectors).astype(np.float32)
-        
-        # Build FAISS index for KNN search
-        dimension = sqrt_topic_vectors.shape[1]
-        index = faiss.IndexFlatL2(dimension)
-        index.add(sqrt_topic_vectors)
-        
-        # Perform KNN search
-        distances, indices = index.search(sqrt_topic_vectors, diffusion_knnk + 1)  # +1 to include self
-        
-        # Normalize distances for Hellinger (divide by sqrt(2))
-        distances = distances / np.sqrt(2.0).astype(np.float32)
+        # Try FAISS first, fallback to scipy if not available
+        try:
+            if not FAISS_AVAILABLE:
+                raise ImportError("FAISS not available")
+                
+            self.logger.info("Using FAISS for diffusion KNN graph construction")
+            # Apply sqrt transformation for Hellinger distance in FAISS
+            sqrt_topic_vectors = np.sqrt(self.topic_vectors).astype(np.float32)
+            
+            # Build FAISS index for KNN search
+            dimension = sqrt_topic_vectors.shape[1]
+            index = faiss.IndexFlatL2(dimension)
+            index.add(sqrt_topic_vectors)
+            
+            # Perform KNN search
+            distances, indices = index.search(sqrt_topic_vectors, diffusion_knnk + 1)  # +1 to include self
+            
+            # Normalize distances for Hellinger (divide by sqrt(2))
+            distances = distances / np.sqrt(2.0).astype(np.float32)
+            
+        except (ImportError, Exception) as e:
+            self.logger.warning(f"FAISS not available for diffusion KNN: {e}. Using scipy fallback")
+            # Fallback to scipy for small datasets
+            from scipy.spatial.distance import pdist, squareform
+            
+            # Apply sqrt transformation for Hellinger distance
+            sqrt_topic_vectors = np.sqrt(self.topic_vectors).astype(np.float32)
+            
+            # Compute pairwise Hellinger distances using scipy
+            hellinger_distances = pdist(sqrt_topic_vectors, metric='euclidean') / np.sqrt(2.0)
+            distance_matrix = squareform(hellinger_distances)
+            
+            # Get KNN indices for each topic
+            indices = []
+            distances = []
+            for i in range(len(sqrt_topic_vectors)):
+                row_distances = distance_matrix[i]
+                # Get indices of k+1 nearest neighbors (including self)
+                nearest_indices = np.argsort(row_distances)[:diffusion_knnk + 1]
+                nearest_distances = row_distances[nearest_indices]
+                indices.append(nearest_indices)
+                distances.append(nearest_distances)
+            
+            indices = np.array(indices)
+            distances = np.array(distances)
         
         # Construct NetworkX graph
         self.knn_chunk_topic_graph = nx.Graph()
@@ -2306,24 +2420,30 @@ class MstmlOrchestrator:
         
         # Add edges (skip first index which is self)
         for i in range(num_topics):
-            for j in range(1, diffusion_knnk + 1):  # Start from 1 to skip self
-                neighbor_idx = indices[i, j]
-                distance = float(distances[i, j])
-                self.knn_chunk_topic_graph.add_edge(i, neighbor_idx, weight=distance)
+            max_neighbors = min(diffusion_knnk + 1, indices.shape[1])
+            for j in range(1, max_neighbors):  # Start from 1 to skip self
+                if j < indices.shape[1]:
+                    neighbor_idx = indices[i, j]
+                    distance = float(distances[i, j])
+                    self.knn_chunk_topic_graph.add_edge(i, neighbor_idx, weight=distance)
         
         # Apply diffusion to author and document distributions  
         self.logger.info("Applying diffusion to author and document distributions")
         
+        # Get diffusion parameters from config
+        num_iterations = self.config['author_doc_embeddings']['num_diffusion_iterations']
+        diffusion_rate = self.config['author_doc_embeddings']['diffusion_rate']
+        
         self.author_ct_distns = {}
         for author_id, barycenter in self.author_topic_barycenters.items():
             self.author_ct_distns[author_id] = diffuse_distribution(
-                self.knn_chunk_topic_graph, barycenter
+                self.knn_chunk_topic_graph, barycenter, num_iterations, diffusion_rate
             )
         
         self.doc_ct_distns = {}
         for doc_id, distribution in self.expanded_doc_topic_distns.items():
             self.doc_ct_distns[doc_id] = diffuse_distribution(
-                self.knn_chunk_topic_graph, distribution
+                self.knn_chunk_topic_graph, distribution, num_iterations, diffusion_rate
             )
     
     # ========================================================================================
@@ -2331,18 +2451,18 @@ class MstmlOrchestrator:
     # ========================================================================================
     
     def build_topic_manifold(self,
-                           distance_metric: str = 'hellinger',
+                           distance_metric: Optional[str] = None,
                            knn_neighbors: Optional[int] = None,
-                           use_faiss: bool = True) -> 'MstmlOrchestrator':
+                           use_faiss: Optional[bool] = None) -> 'MstmlOrchestrator':
         """
         Build topic manifold using information-geometric distances.
         
         Uses the large KNN parameter for manifold construction and hierarchical clustering.
         
         Args:
-            distance_metric: Distance metric ('hellinger', 'euclidean')
-            knn_neighbors: Number of nearest neighbors (uses config faiss_knnk_for_tpc_dendro if None)
-            use_faiss: Use FAISS for fast approximate nearest neighbors
+            distance_metric: Distance metric ('hellinger', 'euclidean') (overrides config)
+            knn_neighbors: Number of nearest neighbors (overrides config)
+            use_faiss: Use FAISS for fast approximate nearest neighbors (overrides config)
         
         Returns:
             Self for method chaining
@@ -2351,21 +2471,23 @@ class MstmlOrchestrator:
         if self.topic_vectors is None:
             raise ValueError("No topic vectors available. Call train_ensemble_models() first.")
         
-        # Use config parameter if knn_neighbors not specified
-        if knn_neighbors is None:
-            knn_neighbors = self.config['temporal']['faiss_knnk_for_tpc_dendro']
+        # Get config defaults and apply parameter overrides
+        distance_config = self.config['distance_metric']
+        mesoscale_config = self.config['mesoscale_filtering']
+        distance_metric = distance_metric if distance_metric is not None else distance_config['type']
+        knn_neighbors = knn_neighbors if knn_neighbors is not None else mesoscale_config['knnk_for_tpc_dendro']
+        use_faiss = use_faiss if use_faiss is not None else mesoscale_config['faiss_acceleration']['enabled']
         
         self.logger.info(f"Building topic manifold with {distance_metric} distance and k={knn_neighbors}")
         
         n_topics = len(self.topic_vectors)
         
         # Use FAISS for large datasets if requested and available
-        faiss_succeeded = False
-        faiss_enabled = self.config['kNN_params']['faiss_acceleration']['enabled']
-        min_vectors = self.config['kNN_params']['faiss_acceleration']['min_vectors_for_faiss']
+        faiss_utilized = False
+        min_vectors = mesoscale_config['faiss_acceleration']['min_vectors_for_faiss']
         
-        if use_faiss and faiss_enabled and n_topics >= min_vectors:
-            self.logger.info(f"Attempting FAISS: use_faiss={use_faiss}, enabled={faiss_enabled}, n_topics={n_topics}, min_vectors={min_vectors}")
+        if use_faiss and n_topics >= min_vectors:
+            self.logger.info(f"Attempting FAISS: use_faiss={use_faiss}, n_topics={n_topics}, min_vectors={min_vectors}")
             try:
                 if not FAISS_AVAILABLE:
                     raise ImportError("FAISS not available")
@@ -2410,15 +2532,15 @@ class MstmlOrchestrator:
                         distance = distances[i, j]
                         self.topic_knn_graph.add_edge(i, neighbor_idx, weight=distance)
                 
-                faiss_succeeded = True
+                faiss_utilized = True
                 
             except (ImportError, Exception) as e:
                 self.logger.warning(f"FAISS failed ({str(e)}), falling back to scipy")
-                faiss_succeeded = False
+                faiss_utilized = False
         
-        if not faiss_succeeded:
+        if not faiss_utilized:
             # Use scipy for smaller datasets or when FAISS is not available
-            self.logger.info(f"Using scipy for {n_topics} topic vectors (faiss_succeeded={faiss_succeeded})")
+            self.logger.info(f"Using scipy for {n_topics} topic vectors (faiss_utilized={faiss_utilized})")
             
             # Compute pairwise distances
             if distance_metric.lower() == 'hellinger':
@@ -2448,7 +2570,7 @@ class MstmlOrchestrator:
         
         # Ensure graph was created successfully
         if self.topic_knn_graph is None:
-            raise RuntimeError("Failed to create topic k-NN graph. Both FAISS and scipy methods failed.")
+            raise RuntimeError("Failed to create topic k-NN graph.")
         
         # Add metadata to nodes
         for topic_idx, topic_info in enumerate(self.chunk_topics):
@@ -2466,9 +2588,9 @@ class MstmlOrchestrator:
         return self
     
     def construct_topic_dendrogram(self,
-                                 linkage_method: str = 'ward',
-                                 distance_metric: str = 'hellinger',
-                                 knn_neighbors: int = 50) -> 'MstmlOrchestrator':
+                                 linkage_method: Optional[str] = None,
+                                 distance_metric: Optional[str] = None,
+                                 knn_neighbors: Optional[int] = None) -> 'MstmlOrchestrator':
         """
         Construct hierarchical topic dendrogram using agglomerative clustering.
         
@@ -2476,9 +2598,9 @@ class MstmlOrchestrator:
         with Hellinger distances using sqrt transformation to Euclidean space.
         
         Args:
-            linkage_method: Hierarchical clustering linkage ('ward', 'average', 'complete', 'single')
-            distance_metric: Distance metric ('hellinger', 'euclidean', 'cosine')
-            knn_neighbors: Number of nearest neighbors for sparse distance matrix
+            linkage_method: Hierarchical clustering linkage ('ward', 'average', 'complete', 'single') (overrides config)
+            distance_metric: Distance metric ('hellinger', 'euclidean', 'cosine') (overrides config)
+            knn_neighbors: Number of nearest neighbors for sparse distance matrix (overrides config)
         
         Returns:
             Self for method chaining
@@ -2486,6 +2608,14 @@ class MstmlOrchestrator:
         
         if self.topic_vectors is None:
             raise ValueError("No topic vectors available. Call train_ensemble_models() first.")
+        
+        # Get config defaults and apply parameter overrides
+        clustering_config = self.config['clustering']
+        distance_config = self.config['distance_metric']
+        mesoscale_config = self.config['mesoscale_filtering']
+        linkage_method = linkage_method if linkage_method is not None else clustering_config['linkage_method']
+        distance_metric = distance_metric if distance_metric is not None else distance_config['type']
+        knn_neighbors = knn_neighbors if knn_neighbors is not None else mesoscale_config['knnk_for_tpc_dendro']
         
         self.logger.info(f"Constructing topic dendrogram with {linkage_method} linkage and {distance_metric} distance")
         
@@ -2743,8 +2873,8 @@ class MstmlOrchestrator:
     
     
     def compute_interdisciplinarity_scores_docs(self,
-                                              entropy_weighting: bool = True,
-                                              author_publication_weighting: bool = True,
+                                              entropy_weighting: Optional[bool] = None,
+                                              author_publication_weighting: Optional[bool] = None,
                                               topn: Optional[int] = None) -> 'MstmlOrchestrator':
         """
         Compute interdisciplinarity scores for documents.
@@ -2753,8 +2883,8 @@ class MstmlOrchestrator:
         where w_u = √N_D(u) weights authors by publication count.
         
         Args:
-            entropy_weighting: Weight by topic distribution entropy
-            author_publication_weighting: Weight by author publication counts
+            entropy_weighting: Weight by topic distribution entropy (overrides config)
+            author_publication_weighting: Weight by author publication counts (overrides config)
             topn: Return top N ranked interdisciplinary documents (None for all)
         
         Returns:
@@ -2763,6 +2893,11 @@ class MstmlOrchestrator:
         
         if not hasattr(self, 'doc_ct_distns') or self.doc_ct_distns is None:
             raise ValueError("No document diffused distributions available. Call train_ensemble_models() first.")
+        
+        # Get config defaults and apply parameter overrides
+        interdisciplinarity_config = self.config['analysis']['interdisciplinarity']
+        entropy_weighting = entropy_weighting if entropy_weighting is not None else interdisciplinarity_config['entropy_weighting']
+        author_publication_weighting = author_publication_weighting if author_publication_weighting is not None else interdisciplinarity_config['author_publication_weighting']
         
         self.logger.info(f"Computing interdisciplinarity scores for documents{' (top ' + str(topn) + ')' if topn else ''}")
         
@@ -2835,9 +2970,9 @@ class MstmlOrchestrator:
         return self
     
     def compute_interdisciplinarity_scores_authors(self,
-                                                  entropy_weighting: bool = True,
-                                                  publication_count_weighting: bool = True,
-                                                  top_topics_threshold: int = 5,
+                                                  entropy_weighting: Optional[bool] = None,
+                                                  publication_count_weighting: Optional[bool] = None,
+                                                  top_topics_threshold: Optional[int] = None,
                                                   topn: Optional[int] = None) -> 'MstmlOrchestrator':
         """
         Compute interdisciplinarity scores for authors.
@@ -2845,9 +2980,9 @@ class MstmlOrchestrator:
         Score based on author topic distribution entropy and publication patterns.
         
         Args:
-            entropy_weighting: Weight by topic distribution entropy
-            publication_count_weighting: Weight by author publication counts
-            top_topics_threshold: Number of top topics to retain per author
+            entropy_weighting: Weight by topic distribution entropy (overrides config)
+            publication_count_weighting: Weight by author publication counts (overrides config)
+            top_topics_threshold: Number of top topics to retain per author (overrides config)
             topn: Return top N ranked interdisciplinary authors (None for all)
         
         Returns:
@@ -2856,6 +2991,12 @@ class MstmlOrchestrator:
         
         if not hasattr(self, 'author_ct_distns') or self.author_ct_distns is None:
             raise ValueError("No author diffused distributions available. Call train_ensemble_models() first.")
+        
+        # Get config defaults and apply parameter overrides
+        interdisciplinarity_config = self.config['analysis']['interdisciplinarity']
+        entropy_weighting = entropy_weighting if entropy_weighting is not None else interdisciplinarity_config['entropy_weighting']
+        publication_count_weighting = publication_count_weighting if publication_count_weighting is not None else interdisciplinarity_config['publication_count_weighting']
+        top_topics_threshold = top_topics_threshold if top_topics_threshold is not None else interdisciplinarity_config['top_topics_threshold']
         
         self.logger.info(f"Computing interdisciplinarity scores for authors{' (top ' + str(topn) + ')' if topn else ''}")
         
@@ -3219,11 +3360,11 @@ class MstmlOrchestrator:
                               color_by: str = 'meta_topic',
                               title: Optional[str] = None,
                               save_path: Optional[str] = None,
-                              figure_size: tuple = (12, 14),
-                              elevation: int = 25,
-                              azimuth: int = 60,
-                              show_colorbar: bool = True,
-                              show_histogram: bool = True,
+                              figure_size: Optional[tuple] = None,
+                              elevation: Optional[int] = None,
+                              azimuth: Optional[int] = None,
+                              show_colorbar: Optional[bool] = None,
+                              show_histogram: Optional[bool] = None,
                               meta_topic_names: Optional[List[str]] = None) -> None:
         """
         Display sophisticated topic embedding visualization based on reference implementation.
@@ -3235,15 +3376,23 @@ class MstmlOrchestrator:
             color_by: Color scheme ('meta_topic', 'time', 'none')
             title: Custom title for the plot
             save_path: Optional path to save the figure
-            figure_size: Figure size as (width, height) tuple
-            elevation: 3D plot elevation angle (ignored for 2D)
-            azimuth: 3D plot azimuth angle (ignored for 2D)
-            show_colorbar: Whether to display colorbar
-            show_histogram: Whether to show topic frequency histogram
+            figure_size: Figure size as (width, height) tuple (overrides config)
+            elevation: 3D plot elevation angle (ignored for 2D) (overrides config)
+            azimuth: 3D plot azimuth angle (ignored for 2D) (overrides config)
+            show_colorbar: Whether to display colorbar (overrides config)
+            show_histogram: Whether to show topic frequency histogram (overrides config)
             meta_topic_names: Optional list of names for meta-topics
         """
         if self.topic_embedding is None:
             raise ValueError("Topic embedding not created. Call create_topic_embedding() first.")
+        
+        # Get config defaults and apply parameter overrides
+        output_config = self.config['output']
+        figure_size = figure_size if figure_size is not None else tuple(output_config['figure_size'])
+        elevation = elevation if elevation is not None else output_config['elevation']
+        azimuth = azimuth if azimuth is not None else output_config['azimuth']
+        show_colorbar = show_colorbar if show_colorbar is not None else output_config['show_colorbar']
+        show_histogram = show_histogram if show_histogram is not None else output_config['show_histogram']
         
         params = self.embed_params
         method_name = params.get('method', 'EMBEDDING')
@@ -3799,7 +3948,7 @@ class MstmlOrchestrator:
             if 'json' in formats:
                 topic_vectors_list = [vec.tolist() for vec in self.topic_vectors]
                 with open(os.path.join(output_directory, 'topic_vectors.json'), 'w') as f:
-                    json.dump(topic_vectors_list, f, indent=2)
+                    json.dump(topic_vectors_list, f, indent=2, cls=NumpyEncoder)
         
         # Export topic embedding if available
         if self.topic_embedding is not None:
@@ -3807,7 +3956,7 @@ class MstmlOrchestrator:
                 write_pickle(os.path.join(output_directory, 'topic_embedding.pkl'), self.topic_embedding)
             if 'json' in formats:
                 with open(os.path.join(output_directory, 'topic_embedding.json'), 'w') as f:
-                    json.dump(self.topic_embedding.tolist(), f, indent=2)
+                    json.dump(self.topic_embedding.tolist(), f, indent=2, cls=NumpyEncoder)
         
         # Export author embeddings if available
         if hasattr(self, 'author_ct_distns') and self.author_ct_distns is not None:
@@ -3816,54 +3965,62 @@ class MstmlOrchestrator:
             if 'json' in formats:
                 # Convert numpy arrays to lists for JSON serialization
                 json_embeddings = {
-                    author: embedding.tolist() if hasattr(embedding, 'tolist') else embedding
+                    author: safe_json_convert(embedding)
                     for author, embedding in self.author_ct_distns.items()
                 }
                 with open(os.path.join(output_directory, 'author_embeddings.json'), 'w') as f:
-                    json.dump(json_embeddings, f, indent=2)
+                    json.dump(json_embeddings, f, indent=2, cls=NumpyEncoder)
         
         # Export interdisciplinarity scores if available
         if self.interdisciplinarity_scores:
             if 'pkl' in formats:
                 write_pickle(os.path.join(output_directory, 'interdisciplinarity_scores.pkl'), self.interdisciplinarity_scores)
             if 'json' in formats:
+                # Convert NumPy types for JSON serialization
+                safe_scores = safe_json_convert(self.interdisciplinarity_scores)
                 with open(os.path.join(output_directory, 'interdisciplinarity_scores.json'), 'w') as f:
-                    json.dump(self.interdisciplinarity_scores, f, indent=2)
+                    json.dump(safe_scores, f, indent=2, cls=NumpyEncoder)
         
         # Export time chunks information if available
         if self.time_chunks:
             if 'pkl' in formats:
                 write_pickle(os.path.join(output_directory, 'time_chunks.pkl'), self.time_chunks)
             if 'json' in formats:
-                # Convert datetime objects to strings for JSON
+                # Convert datetime objects and NumPy types to JSON-serializable format
                 json_chunks = []
                 for chunk in self.time_chunks:
-                    json_chunk = chunk.copy()
-                    json_chunk['start_date'] = chunk['start_date'].strftime('%Y-%m-%d')
-                    json_chunk['end_date'] = chunk['end_date'].strftime('%Y-%m-%d')
+                    json_chunk = {}
+                    for key, value in chunk.items():
+                        if key in ['start_date', 'end_date'] and hasattr(value, 'strftime'):
+                            json_chunk[key] = value.strftime('%Y-%m-%d')
+                        else:
+                            json_chunk[key] = safe_json_convert(value)
                     json_chunks.append(json_chunk)
                 with open(os.path.join(output_directory, 'time_chunks.json'), 'w') as f:
-                    json.dump(json_chunks, f, indent=2)
+                    json.dump(json_chunks, f, indent=2, cls=NumpyEncoder)
         
         # Export configuration and metadata
         export_metadata = {
             'experiment_directory': self.experiment_directory,
             'dataset_directory': str(self.dataset_directory),
-            'config': self.config,
+            'config': safe_json_convert(self.config),
             'analysis_components': {
                 'has_topic_vectors': self.topic_vectors is not None,
                 'has_topic_embedding': self.topic_embedding is not None,
                 'has_author_embeddings': hasattr(self, 'author_ct_distns') and self.author_ct_distns is not None,
                 'has_interdisciplinarity_scores': bool(self.interdisciplinarity_scores),
-                'num_time_chunks': len(self.time_chunks),
-                'coauthor_network_nodes': self.coauthor_network.number_of_nodes() if self.coauthor_network else 0,
-                'coauthor_network_edges': self.coauthor_network.number_of_edges() if self.coauthor_network else 0
+                'num_time_chunks': int(len(self.time_chunks)),  # Ensure Python int
+                'coauthor_network_nodes': int(self.coauthor_network.number_of_nodes()) if self.coauthor_network else 0,
+                'coauthor_network_edges': int(self.coauthor_network.number_of_edges()) if self.coauthor_network else 0
             },
             'export_timestamp': dt.datetime.now().isoformat()
         }
         
+        # Safe convert the entire metadata structure
+        safe_metadata = safe_json_convert(export_metadata)
+        
         with open(os.path.join(output_directory, 'analysis_metadata.json'), 'w') as f:
-            json.dump(export_metadata, f, indent=2)
+            json.dump(safe_metadata, f, indent=2, cls=NumpyEncoder)
         
         self.logger.info(f"Results export completed - {len(formats)} formats exported")
         return self
@@ -3899,156 +4056,19 @@ class MstmlOrchestrator:
     # ========================================================================================
     
     def _get_default_config(self) -> dict:
-        """Get default configuration parameters organized by component."""
-        return {
-            # Temporal Analysis Configuration
-            'temporal': {
-                'gamma_temporal_decay': 0.75,
-            },
-            
-            # Topic Model Configuration  
-            'topic_model': {
-                'type': 'LDA',  # 'LDA', 'BERTopic', 'GPTopic'
-                'params': {
-                    # LDA-specific parameters (used when type='LDA')
-                    'lda': {
-                        'alpha': 'symmetric',
-                        'eta': None,
-                        'npasses': 5,
-                        'ngibbs': 50,
-                        'num_topics': 'auto',
-                        'random_state': 42
-                    },
-                    # BERTopic parameters (used when type='BERTopic')  
-                    'bertopic': {
-                        'embedding_model': 'all-MiniLM-L6-v2',
-                        'umap_params': {'n_neighbors': 15, 'min_dist': 0.1},
-                        'hdbscan_params': {'min_cluster_size': 10},
-                        'min_topic_size': 10,
-                        'calculate_probabilities': True
-                    },
-                    # GPT-based topic modeling parameters
-                    'gptopic': {
-                        'model_name': 'gpt-3.5-turbo',
-                        'max_tokens': 150,
-                        'temperature': 0.3,
-                        'num_keywords': 10
-                    }
-                }
-            },
-            
-            # Distance Metric Configuration
-            'distance_metric': {
-                'type': 'hellinger',  # 'hellinger', 'cosine', 'euclidean', 'jensen_shannon'
-                'params': {
-                    'hellinger': {},  # No additional params for Hellinger
-                    'cosine': {'normalize': True},
-                    'euclidean': {'normalize': False},
-                    'jensen_shannon': {'base': 2}
-                }
-            },
-            
-            # Embedding Configuration
-            'topic_embedding': {
-                'type': 'PHATE',  # 'PHATE', 'UMAP', 'TSNE'
-                'params': {
-                    'phate': {
-                        'n_components': 2,
-                        'knn': 5,
-                        'decay': 40,
-                        'gamma': 1.0,
-                        't': 'auto',
-                        'random_state': 42
-                    },
-                    'umap': {
-                        'n_components': 2,
-                        'n_neighbors': 15,
-                        'min_dist': 0.1,
-                        'metric': 'cosine',
-                        'random_state': 42
-                    },
-                    'tsne': {
-                        'n_components': 2,
-                        'perplexity': 30,
-                        'learning_rate': 200,
-                        'random_state': 42
-                    }
-                }
-            },
-
-            'author_doc_embeddings': {
-                'author_topic_barycenters': True,  #  Weight author distns by reciprocal of number of co-authors per doc
-                'ct_distn_diffusion_knnk': 5,  #  Small KNN for author distribution diffusion
-                'num_diffusion_iterations': 1,  #  Message passing iterations for diffusing author distributions
-                'diffusion_rate': 0.7,  #  Strength of influence between neighbors during each msg passing iteration [0, 1]
-            },
-            
-            # Mesoscale Configuration
-            'mesoscale_filtering': {
-                'knnk_for_tpc_dendro': 100,  # Large KNN for topic manifold/dendrogram construction
-                'faiss_acceleration': {
-                    'enabled': False,  # Enable FAISS for large datasets
-                    'index_type': 'IndexFlatL2',  # 'IndexFlatL2', 'IndexIVFFlat', 'IndexHNSW'
-                    'min_vectors_for_faiss': 1000,  # Use FAISS only for datasets larger than this
-                }
-            },
-            
-            # Hierarchical Clustering Configuration
-            'clustering': {
-                'linkage_method': 'ward',  # 'ward', 'complete', 'average', 'single'
-                'normalize_heights': True,
-                'distance_threshold': 'auto',  # 'auto' or numeric value
-                'min_cluster_size': 2
-            },
-            
-            # Analysis Configuration
-            'analysis': {
-                'term_relevancy': {
-                    'lambda': 0.6,
-                    'top_terms': 2000,
-                },
-                'interdisciplinarity': {
-                    'top_topics': 5,
-                    'scoring_method': 'entropy',  # 'entropy', 'gini', 'simpson'
-                    'aggregation_method': 'mean'  # 'mean', 'max', 'weighted'
-                },
-                'link_prediction': {
-                    'anomaly_threshold': 0.1,
-                    'prediction_method': 'hrg',  # 'hrg', 'common_neighbors', 'jaccard'
-                    'validation_split': 0.2
-                }
-            },
-            
-            # Processing Configuration
-            'processing': {
-                'multiprocessing': {
-                    'enabled': True,
-                    'n_jobs': -1,  # -1 for all available cores
-                    'chunk_size': 'auto'
-                },
-                'memory_optimization': {
-                    'use_float32': True,  # Use float32 instead of float64 where possible
-                    'batch_processing': True,
-                    'max_batch_size': 1000
-                },
-                'caching': {
-                    'enabled': True,
-                    'cache_embeddings': True,
-                    'cache_distance_matrices': True,
-                    'cache_dir': '.mstml_cache'
-                }
-            },
-            
-            # Logging and Output Configuration
-            'output': {
-                'logging_level': 'INFO',  # 'DEBUG', 'INFO', 'WARNING', 'ERROR'
-                'progress_bars': True,
-                'save_intermediate_results': False,
-                'export_formats': ['json', 'csv', 'pkl'],
-                'figure_format': 'pdf',  # 'png', 'pdf', 'svg'
-                'figure_dpi': 300
-            }
-        }
+        """Load default configuration from YAML file."""
+        config_path = Path(__file__).parent / 'config.yaml'
+        
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+            return config
+        except FileNotFoundError:
+            self.logger.error(f"Config file not found at {config_path}")
+            raise
+        except yaml.YAMLError as e:
+            self.logger.error(f"Error parsing config file: {e}")
+            raise
     
     def _setup_logger(self) -> logging.Logger:
         """Setup default logger for MSTML operations."""

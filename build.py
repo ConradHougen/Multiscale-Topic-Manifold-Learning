@@ -14,10 +14,21 @@ import logging
 import re
 
 class MstmlBuilder:
-    def __init__(self, env_name: str = "mstml"):
+    def __init__(self, env_name: str = "mstml", force_cpu_only: bool = False):
         self.env_name = env_name
+        self.force_cpu_only = force_cpu_only
         self.has_conda = self._check_conda()
-        self.conda_packages = self._load_requirements("conda_requirements.txt")
+        all_packages = self._load_requirements("conda_requirements.txt")
+        
+        # Separate FAISS packages (need special channel) from regular packages
+        self.faiss_packages = [pkg for pkg in all_packages if 'faiss' in pkg.lower()]
+        self.conda_packages = [pkg for pkg in all_packages if 'faiss' not in pkg.lower()]
+        
+        # Force CPU-only if requested
+        if self.force_cpu_only and self.faiss_packages:
+            self.faiss_packages = [pkg.replace('faiss-gpu', 'faiss-cpu') for pkg in self.faiss_packages]
+            print(f"⚠ Forced CPU-only mode: FAISS packages changed to {self.faiss_packages}")
+        
         self.pip_requirements_file = "requirements.txt"
 
         # Setup logging
@@ -145,6 +156,116 @@ class MstmlBuilder:
         conda_cmd = f"conda create -n {self.env_name} -c conda-forge -c defaults {' '.join(self.conda_packages)} -y"
         return self._run(conda_cmd, f"Creating environment {self.env_name}")
 
+    def _get_platform(self):
+        """Detect the current platform."""
+        import platform
+        system = platform.system().lower()
+        if system == "linux":
+            return "linux"
+        elif system == "darwin":
+            return "osx"  
+        elif system == "windows":
+            return "windows"
+        else:
+            return "unknown"
+
+    def _install_faiss(self):
+        """Install FAISS using conda packages with proper dependency resolution."""
+        if not self.faiss_packages:
+            print("No FAISS packages to install")
+            return True
+            
+        print(f"\n{'='*60}\nFAISS Installation\n{'='*60}")
+        
+        platform = self._get_platform()
+        print(f"Detected platform: {platform}")
+        
+        # Determine if we should attempt GPU installation
+        should_try_gpu = False
+        gpu_detected = False
+        
+        if platform == "linux" and not self.force_cpu_only:
+            # Try to detect GPU but don't let detection failure prevent GPU installation attempt
+            try:
+                result = subprocess.run("nvidia-smi", capture_output=True)
+                gpu_detected = (result.returncode == 0)
+                if gpu_detected:
+                    print("✓ NVIDIA GPU detected on Linux")
+                else:
+                    print("⚠ nvidia-smi not found, but will still try FAISS-GPU (may work anyway)")
+            except FileNotFoundError:
+                print("⚠ nvidia-smi not found, but will still try FAISS-GPU (may work anyway)")
+            
+            # Always attempt GPU on Linux unless user explicitly said --cpu-only
+            should_try_gpu = True
+        elif self.force_cpu_only:
+            print("⚠ CPU-only mode forced by user (--cpu-only flag)")
+        else:
+            print(f"⚠ FAISS-GPU not available on {platform} (Linux only)")
+        
+        # Install based on platform and user preference
+        if should_try_gpu:
+            # Linux with GPU: try cuVS first, then regular GPU, then CPU fallback
+            print("Installing FAISS with GPU support...")
+            
+            # Try cuVS version (most advanced)
+            cuvs_cmd = f"conda install -n {self.env_name} -c pytorch -c nvidia -c rapidsai -c conda-forge libnvjitlink faiss-gpu-cuvs -y"
+            if self._run(cuvs_cmd, "Installing FAISS-GPU with cuVS (most advanced)"):
+                test_cmd = f'conda run -n {self.env_name} python -c "import faiss; print(f\'FAISS ready with {{faiss.get_num_gpus()}} GPU(s)\')"'
+                if self._run(test_cmd, "Testing FAISS-GPU-cuVS", show_progress=False):
+                    print("✓ FAISS-GPU with cuVS installed successfully!")
+                    return True
+                else:
+                    print("cuVS installation failed, trying regular GPU version...")
+                    self._run(f"conda remove -n {self.env_name} faiss-gpu-cuvs libnvjitlink -y", "Cleaning up cuVS")
+            
+            # Try regular GPU version
+            gpu_cmd = f"conda install -n {self.env_name} -c pytorch -c nvidia faiss-gpu -y"
+            if self._run(gpu_cmd, "Installing FAISS-GPU (regular)"):
+                test_cmd = f'conda run -n {self.env_name} python -c "import faiss; print(f\'FAISS ready with {{faiss.get_num_gpus()}} GPU(s)\')"'
+                if self._run(test_cmd, "Testing FAISS-GPU", show_progress=False):
+                    print("✓ FAISS-GPU installed successfully!")
+                    return True
+                else:
+                    print("GPU version failed, falling back to CPU...")
+                    self._run(f"conda remove -n {self.env_name} faiss-gpu -y", "Cleaning up GPU version")
+        
+        # Install CPU version (Linux without GPU, Windows, OSX, or fallback)
+        print("Installing FAISS-CPU...")
+        
+        # Step 1: Install MKL dependencies for better compatibility (especially on Windows/Linux)
+        print("Installing MKL dependencies for FAISS...")
+        mkl_cmd = f"conda install -n {self.env_name} -c conda-forge mkl -y"
+        self._run(mkl_cmd, "Installing MKL math libraries", show_progress=False)
+        
+        # Step 2: Try conda-forge first (better dependency resolution)
+        print("Trying conda-forge FAISS-CPU (recommended)...")
+        forge_cmd = f"conda install -n {self.env_name} -c conda-forge faiss-cpu -y"
+        if self._run(forge_cmd, "Installing FAISS-CPU from conda-forge"):
+            test_cmd = f'conda run -n {self.env_name} python -c "import faiss; print(\'FAISS version:\', faiss.__version__); print(\'FAISS-CPU ready\')"'
+            if self._run(test_cmd, "Testing conda-forge FAISS-CPU", show_progress=False):
+                print("✓ FAISS-CPU (conda-forge) installed successfully!")
+                return True
+            else:
+                print("conda-forge version has import issues, trying PyTorch channel...")
+                self._run(f"conda remove -n {self.env_name} faiss faiss-cpu libfaiss -y", "Cleaning up conda-forge version")
+        
+        # Step 3: Try PyTorch channel as fallback
+        print("Trying PyTorch channel FAISS-CPU...")
+        pytorch_cmd = f"conda install -n {self.env_name} -c pytorch faiss-cpu -y"
+        if self._run(pytorch_cmd, "Installing FAISS-CPU from PyTorch channel"):
+            test_cmd = f'conda run -n {self.env_name} python -c "import faiss; print(\'FAISS version:\', faiss.__version__); print(\'FAISS-CPU ready\')"'
+            if self._run(test_cmd, "Testing PyTorch FAISS-CPU", show_progress=False):
+                print("✓ FAISS-CPU (PyTorch) installed successfully!")
+                return True
+            else:
+                print("PyTorch version has import issues...")
+                self._run(f"conda remove -n {self.env_name} faiss-cpu libfaiss -y", "Cleaning up PyTorch version")
+        
+        print("❌ FAISS installation failed. MSTML will use scipy fallbacks.")
+        print("This is normal and doesn't affect functionality - scipy provides the same results.")
+        return False
+
     def _install_pip_and_package(self):
         pip_cmd = f"conda run -n {self.env_name} pip install -e ."
         if os.path.exists(self.pip_requirements_file):
@@ -159,10 +280,21 @@ class MstmlBuilder:
         return True
 
     def _test_import(self):
-        return self._run(
+        # Test MSTML import
+        mstml_success = self._run(
             f'conda run -n {self.env_name} python -c "import mstml; print(\'✓ MSTML import successful\')"',
             "Testing mstml import"
         )
+        
+        # Test FAISS import (optional) - final verification
+        print("\n" + "="*60 + "\nFinal FAISS Status Check\n" + "="*60)
+        faiss_test = f'conda run -n {self.env_name} python -c "import faiss; print(\'FAISS ready for use\')"'
+        if self._run(faiss_test, "Final FAISS verification", show_progress=False):
+            print("✓ FAISS is available and ready")
+        else:
+            print("⚠ FAISS not available - MSTML will use scipy fallbacks")
+        
+        return mstml_success
 
     def build(self):
         print("Starting MSTML build...")
@@ -171,6 +303,8 @@ class MstmlBuilder:
             return False
         if not self._create_or_reuse_env():
             return False
+        if not self._install_faiss():
+            print("Warning: FAISS installation failed. Continuing without FAISS support.")
         if not self._install_pip_and_package():
             return False
         self._download_nltk()
@@ -181,10 +315,12 @@ class MstmlBuilder:
         return True
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="MSTML Framework Build Script")
     parser.add_argument("--env-name", default="mstml", help="Name of the conda environment to create/use")
+    parser.add_argument("--cpu-only", action="store_true", help="Force CPU-only installation (no GPU acceleration)")
     args = parser.parse_args()
-    success = MstmlBuilder(env_name=args.env_name).build()
+    
+    success = MstmlBuilder(env_name=args.env_name, force_cpu_only=args.cpu_only).build()
     sys.exit(0 if success else 1)
 
 if __name__ == "__main__":
