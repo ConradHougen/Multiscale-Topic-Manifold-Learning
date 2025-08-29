@@ -2358,11 +2358,15 @@ class MstmlOrchestrator:
     def _create_diffusion_knn_graph(self) -> None:
         """
         Create KNN graph for chunk topic diffusion and apply diffusion process.
-        Uses the small KNN parameter for local diffusion of author/document distributions.
+        Following reference implementation: use large kNN for initial FAISS search,
+        then filter to small kNN for actual diffusion graph.
         """
         
-        diffusion_knnk = self.config['author_doc_embeddings']['ct_distn_diffusion_knnk']
-        self.logger.info(f"Creating diffusion KNN graph with k={diffusion_knnk}")
+        # Get both KNN parameters - this is the key fix!
+        manifold_knnk = self.config['mesoscale_filtering']['knnk_for_tpc_dendro']  # Large k (~100)
+        diffusion_knnk = self.config['author_doc_embeddings']['ct_distn_diffusion_knnk']  # Small k (~5)
+        
+        self.logger.info(f"Creating diffusion KNN graph: FAISS search with k={manifold_knnk}, diffusion graph with k={diffusion_knnk}")
         
         # Use topic vectors (chunk_topic_wfs) for KNN graph construction
         if self.topic_vectors is None:
@@ -2382,8 +2386,8 @@ class MstmlOrchestrator:
             index = faiss.IndexFlatL2(dimension)
             index.add(sqrt_topic_vectors)
             
-            # Perform KNN search
-            distances, indices = index.search(sqrt_topic_vectors, diffusion_knnk + 1)  # +1 to include self
+            # Perform KNN search with LARGE k (like reference code)
+            distances, indices = index.search(sqrt_topic_vectors, manifold_knnk + 1)  # +1 to include self
             
             # Normalize distances for Hellinger (divide by sqrt(2))
             distances = distances / np.sqrt(2.0).astype(np.float32)
@@ -2405,8 +2409,8 @@ class MstmlOrchestrator:
             distances = []
             for i in range(len(sqrt_topic_vectors)):
                 row_distances = distance_matrix[i]
-                # Get indices of k+1 nearest neighbors (including self)
-                nearest_indices = np.argsort(row_distances)[:diffusion_knnk + 1]
+                # Get indices of k+1 nearest neighbors (including self) using LARGE k
+                nearest_indices = np.argsort(row_distances)[:manifold_knnk + 1]
                 nearest_distances = row_distances[nearest_indices]
                 indices.append(nearest_indices)
                 distances.append(nearest_distances)
@@ -2414,14 +2418,14 @@ class MstmlOrchestrator:
             indices = np.array(indices)
             distances = np.array(distances)
         
-        # Construct NetworkX graph
+        # Construct NetworkX graph using SMALL k for diffusion (like reference code)
         self.knn_chunk_topic_graph = nx.Graph()
         num_topics = len(self.topic_vectors)
         
         # Add all nodes
         self.knn_chunk_topic_graph.add_nodes_from(range(num_topics))
         
-        # Add edges (skip first index which is self)
+        # Add edges using ONLY the first diffusion_knnk neighbors (skip first index which is self)
         for i in range(num_topics):
             max_neighbors = min(diffusion_knnk + 1, indices.shape[1])
             for j in range(1, max_neighbors):  # Start from 1 to skip self
@@ -2430,19 +2434,21 @@ class MstmlOrchestrator:
                     distance = float(distances[i, j])
                     self.knn_chunk_topic_graph.add_edge(i, neighbor_idx, weight=distance)
         
-        # Apply diffusion to author and document distributions  
+        # Apply diffusion to author and document distributions (following reference implementation)
         self.logger.info("Applying diffusion to author and document distributions")
         
-        # Get diffusion parameters from config
+        # Get diffusion parameters from config  
         num_iterations = self.config['author_doc_embeddings']['num_diffusion_iterations']
         diffusion_rate = self.config['author_doc_embeddings']['diffusion_rate']
         
+        # Process authors (like reference code - simple sequential loop)
         self.author_ct_distns = {}
         for author_id, barycenter in self.author_topic_barycenters.items():
             self.author_ct_distns[author_id] = diffuse_distribution(
                 self.knn_chunk_topic_graph, barycenter, num_iterations, diffusion_rate
             )
         
+        # Process documents (like reference code - simple sequential loop) 
         self.doc_ct_distns = {}
         for doc_id, distribution in self.expanded_doc_topic_distns.items():
             self.doc_ct_distns[doc_id] = diffuse_distribution(
