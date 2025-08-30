@@ -13,6 +13,7 @@ from scipy.special import rel_entr
 from sklearn.cluster import AgglomerativeClustering
 from math import log
 from collections import Counter
+from scipy.sparse import csr_matrix
 
 
 # ============================================================================
@@ -222,14 +223,61 @@ def entropy_of_max_weighted_mean(vecs: list[np.ndarray]):
 # Diffusion and Graph Processing
 # ============================================================================
 
+def build_diffusion_matrix(indices, distances, num_topics, diffusion_knnk):
+    """Build sparse diffusion matrix from KNN search results"""
+    
+    row_indices = []
+    col_indices = []  
+    weights = []
+    
+    for i in range(num_topics):
+        # Get neighbors (skip first index which is self)
+        max_neighbors = min(diffusion_knnk, indices.shape[1] - 1)
+        neighbors = indices[i, 1:max_neighbors+1]
+        dists = distances[i, 1:max_neighbors+1]
+        
+        if len(dists) > 0 and dists.sum() > 0:
+            # Convert distances to similarity weights
+            norm_weights = 1 - (dists / dists.sum())
+            
+            for neighbor, weight in zip(neighbors, norm_weights):
+                row_indices.append(i)
+                col_indices.append(neighbor)
+                weights.append(weight)
+    
+    return csr_matrix((weights, (row_indices, col_indices)), shape=(num_topics, num_topics))
+
+
+def diffuse_distribution_matrix(diffusion_matrix, known_dist, num_iterations=1, diffusion_rate=0.7):
+    """Matrix-based diffusion using sparse matrix operations"""
+    distribution = np.copy(known_dist).astype(np.float32)
+    mask = (known_dist == 0)
+    
+    for _ in range(num_iterations):
+        if mask.any():
+            # Apply diffusion only to nodes without known distributions
+            diffused_values = diffusion_rate * (diffusion_matrix @ distribution)
+            distribution[mask] = diffused_values[mask]
+        
+        # Preserve known distributions
+        distribution[~mask] = known_dist[~mask]
+    
+    # Normalize the distribution to sum to 1
+    total = distribution.sum()
+    if total > 0:
+        distribution /= total
+    
+    return distribution
+
+
 def diffuse_distribution(graph, known_dist, num_iterations=1, diffusion_rate=0.7):
     """Function to perform diffusion for the author topic distributions over the chunk topic kNN graph"""
     num_topics = len(known_dist)
-    distribution = np.copy(known_dist).astype(np.float32)  # Convert to float32
-    buffer = np.zeros(num_topics, dtype=np.float32)  # Preallocate buffer for in-place updates
+    distribution = np.copy(known_dist).astype(np.float32)
+    buffer = np.zeros(num_topics, dtype=np.float32)
 
     for _ in range(num_iterations):
-        buffer.fill(0)  # Reset buffer instead of reallocating
+        buffer.fill(0)
 
         for node in range(num_topics):
             if known_dist[node] > 0:
@@ -238,11 +286,11 @@ def diffuse_distribution(graph, known_dist, num_iterations=1, diffusion_rate=0.7
                 neighbors = list(graph.neighbors(node))
                 if neighbors:
                     weights = np.array([graph[node][neighbor]['weight'] for neighbor in neighbors], dtype=np.float32)
-                    norm_weights = 1 - (weights / weights.sum())  # Convert distances to similarity weights in-place
+                    norm_weights = 1 - (weights / weights.sum())
                     neighbors_dist = np.array([distribution[neighbor] for neighbor in neighbors], dtype=np.float32)
-                    buffer[node] += diffusion_rate * np.dot(norm_weights, neighbors_dist)  # Vectorized dot product
+                    buffer[node] += diffusion_rate * np.dot(norm_weights, neighbors_dist)
 
-        distribution[:] = buffer  # Update distribution in-place
+        distribution[:] = buffer
 
     # Normalize the distribution to sum to 1
     distribution /= distribution.sum(dtype=np.float32)

@@ -50,7 +50,7 @@ from datetime import datetime
 from gensim.models import LdaModel, LdaMulticore, CoherenceModel
 from gensim.corpora import Dictionary
 from scipy.spatial.distance import pdist, squareform
-from scipy.cluster.hierarchy import linkage, dendrogram
+from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
 from scipy.stats import entropy
 from collections import OrderedDict
 from scipy.cluster.hierarchy import fcluster
@@ -74,7 +74,7 @@ from ._graph_driver import (
     build_temporal_coauthor_networks_from_dataframe, 
     compose_networks_from_dict
 )
-from ._math_driver import hellinger, diffuse_distribution, rescale_parameter
+from ._math_driver import hellinger, diffuse_distribution, build_diffusion_matrix, diffuse_distribution_matrix, rescale_parameter
 from ._topic_model_driver import setup_author_probs_matrix, find_max_min_cut_distance, expand_doc_topic_distns, compute_author_barycenters
 from .fast_encode_tree import fast_encode_tree_structure
 
@@ -866,22 +866,20 @@ class MstmlOrchestrator:
     # Component Management - Getter/Setter Methods
     # ============================================================================
     
-    def get_data_loader(self) -> Optional[DataLoader]:
+    @property
+    def data_loader(self) -> Optional[DataLoader]:
         """Get the current DataLoader instance."""
         return self._data_loader
     
-    def set_data_loader(self, data_loader: DataLoader) -> 'MstmlOrchestrator':
+    @data_loader.setter
+    def data_loader(self, data_loader: DataLoader) -> None:
         """
         Set a custom DataLoader instance.
         
         Args:
             data_loader: Configured DataLoader instance
             
-        Returns:
-            Self for method chaining
-            
         Example:
-            
             # Create and configure DataLoader
             loader = JsonDataLoader.with_config({
                 'data_filters': {
@@ -890,10 +888,15 @@ class MstmlOrchestrator:
                 }
             })
             
-            orchestrator.set_data_loader(loader)
+            orchestrator.data_loader = loader
         """
         self._data_loader = data_loader
-        self.logger.info("DataLoader updated")
+        if hasattr(self, 'logger'):
+            self.logger.info("DataLoader updated")
+    
+    def set_data_loader(self, data_loader: DataLoader) -> 'MstmlOrchestrator':
+        """Set a custom DataLoader instance (method chaining version)."""
+        self.data_loader = data_loader
         return self
     
     def get_text_preprocessor(self) -> Optional['TextPreprocessor']:
@@ -981,7 +984,7 @@ class MstmlOrchestrator:
                 custom_filter=recent_papers
             )
         """
-        if self._data_loader is None:
+        if self.data_loader is None:
             # Create a default DataLoader with the filters
             filters = {}
             if date_range:
@@ -997,7 +1000,7 @@ class MstmlOrchestrator:
             self._pending_data_filters = filters
         else:
             # Update existing DataLoader's configuration
-            current_filters = self._data_loader.data_filters.copy()
+            current_filters = self.data_loader.data_filters.copy()
             if date_range:
                 current_filters['date_range'] = self._normalize_date_range(date_range)
             if categories:
@@ -1006,7 +1009,7 @@ class MstmlOrchestrator:
                 current_filters['custom'] = {'function': custom_filter}
             current_filters.update(kwargs)
             
-            self._data_loader.data_filters = current_filters
+            self.data_loader.data_filters = current_filters
             
         self.logger.info("Data filters configured")
         return self
@@ -1099,6 +1102,7 @@ class MstmlOrchestrator:
         
         self.logger.info(f"Default components initialized: {distance_type} distance, {embedding_type} embedding")
 
+
     # ========================================================================================
     # 1. DATA LOADING AND MANAGEMENT
     # ========================================================================================
@@ -1146,8 +1150,33 @@ class MstmlOrchestrator:
                 data_filters={'categories': ['cs.AI']}
             )
         """
+        # Handle overwrite parameter
+        if overwrite is None:
+            overwrite = getattr(self, '_default_overwrite', False)
+        
+        # Check for cached data with processing status
+        main_df_cache_path = os.path.join(self.experiment_directory, "main_df.pkl")
+        
+        if not overwrite and os.path.exists(main_df_cache_path):
+            status = self._load_processing_status()
+            if status.get('load_data', False):
+                self.logger.info("Loading cached data from main_df.pkl")
+                self.documents_df = read_pickle(main_df_cache_path)
+                self.logger.info(f"Loaded {len(self.documents_df)} documents from cache")
+                
+                # Load cached data_loader if available
+                data_loader_cache_path = os.path.join(self.experiment_directory, "data_loader.pkl")
+                if os.path.exists(data_loader_cache_path):
+                    try:
+                        self.data_loader = read_pickle(data_loader_cache_path)
+                        self.logger.info("Loaded cached data_loader")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to load cached data_loader: {e}")
+                
+                return self
+        
         # Skip loading if already loaded (unless overwrite)
-        if self.documents_df is not None and (overwrite is False or (overwrite is None and not getattr(self, '_default_overwrite', False))):
+        if self.documents_df is not None and not overwrite:
             self.logger.info("Data already loaded. Use overwrite=True to reload.")
             return self
             
@@ -1170,34 +1199,32 @@ class MstmlOrchestrator:
             raise ValueError("No files to load. Either specify filenames or ensure supported files exist in original/ directory.")
         
         # Handle DataLoader creation or configuration
-        if self._data_loader is not None:
+        if self.data_loader is not None:
             # Use existing DataLoader but may need to update configuration
             self.logger.info("Using pre-configured DataLoader")
             
             # Check if it was created with with_config() and needs initialization
-            if hasattr(self._data_loader, '_stored_config'):
-                self._data_loader._apply_stored_config(filenames, self.dataset_name)
+            if hasattr(self.data_loader, '_stored_config'):
+                self.data_loader._apply_stored_config(filenames, self.dataset_name)
             
             # Apply parameter overrides if provided
             if author_disambiguation is not None:
-                if author_disambiguation and self._data_loader.author_disambiguator is None:
-                    self._data_loader.author_disambiguator = self._author_disambiguator or AuthorDisambiguator()
+                if author_disambiguation and self.data_loader.author_disambiguator is None:
+                    self.data_loader.author_disambiguator = self._author_disambiguator or AuthorDisambiguator()
                 elif not author_disambiguation:
-                    self._data_loader.author_disambiguator = None
+                    self.data_loader.author_disambiguator = None
                     
             if overwrite is not None:
-                self._data_loader._overwrite = overwrite
+                self.data_loader._overwrite = overwrite
                 
             # Merge data filters  
             if data_filters or self._pending_data_filters:
-                current_filters = self._data_loader.data_filters.copy()
+                current_filters = self.data_loader.data_filters.copy()
                 if self._pending_data_filters:
                     current_filters.update(self._pending_data_filters)
                 if data_filters:
                     current_filters.update(data_filters)
-                self._data_loader.data_filters = current_filters
-                
-            self.data_loader = self._data_loader
+                self.data_loader.data_filters = current_filters
             
         else:
             # Create new DataLoader based on file extensions
@@ -1234,9 +1261,6 @@ class MstmlOrchestrator:
                     data_filters=final_filters or None
                 )
                 
-                # Store reference for future use
-                self._data_loader = self.data_loader
-                
             else:
                 # Get supported extensions for error message
                 supported_extensions = DataLoaderRegistry.get_supported_extensions()
@@ -1264,6 +1288,18 @@ class MstmlOrchestrator:
         # Get the processed dataframes
         self.documents_df = self.data_loader.get_clean_df()
         self.logger.info(f"Loaded {len(self.documents_df)} documents")
+        
+        # Cache data and update processing status
+        self.logger.info("Caching data to main_df.pkl")
+        write_pickle(main_df_cache_path, self.documents_df)
+        
+        # Cache data_loader for future use
+        if self.data_loader is not None:
+            data_loader_cache_path = os.path.join(self.experiment_directory, "data_loader.pkl")
+            write_pickle(data_loader_cache_path, self.data_loader)
+            self.logger.info("Cached data_loader")
+        
+        self._update_processing_status('load_data', True)
         
         return self
     
@@ -1300,8 +1336,23 @@ class MstmlOrchestrator:
                 input_schema_map={'abstract': 'raw_text', 'update_date': 'date'}
             )
         """
+        # Handle overwrite parameter
+        if overwrite is None:
+            overwrite = getattr(self, '_default_overwrite', False)
+        
+        # Check for cached data with processing status
+        main_df_cache_path = os.path.join(self.experiment_directory, "main_df.pkl")
+        
+        if not overwrite and os.path.exists(main_df_cache_path):
+            status = self._load_processing_status()
+            if status.get('load_data', False):
+                self.logger.info("Loading cached raw data from main_df.pkl")
+                self.documents_df = read_pickle(main_df_cache_path)
+                self.logger.info(f"Loaded {len(self.documents_df)} raw documents from cache")
+                return self
+        
         # Skip loading if already loaded (unless overwrite)
-        if self.documents_df is not None and (overwrite is False or (overwrite is None and not getattr(self, '_default_overwrite', False))):
+        if self.documents_df is not None and not overwrite:
             self.logger.info("Data already loaded. Use overwrite=True to reload.")
             return self
             
@@ -1351,8 +1402,6 @@ class MstmlOrchestrator:
             input_schema_map=input_schema_map  # Field mapping for data format
         )
         
-        self._data_loader = self.data_loader
-        
         # ONLY run the minimal data loading steps (not the full pipeline)
         # Step 1: Load raw data from files
         self.data_loader._prepare_environment()
@@ -1369,12 +1418,25 @@ class MstmlOrchestrator:
         self.documents_df = self.data_loader.get_clean_df()
         self.logger.info(f"Loaded {len(self.documents_df)} raw documents (no filters, no author disambiguation)")
         
+        # Cache raw data and update processing status
+        self.logger.info("Caching raw data to main_df.pkl")
+        write_pickle(main_df_cache_path, self.documents_df)
+        
+        # Cache data_loader for future use
+        if self.data_loader is not None:
+            data_loader_cache_path = os.path.join(self.experiment_directory, "data_loader.pkl")
+            write_pickle(data_loader_cache_path, self.data_loader)
+            self.logger.info("Cached data_loader")
+        
+        self._update_processing_status('load_data', True)
+        
         return self
     
     def apply_data_filters(self,
                           date_range: Optional[Dict[str, str]] = None,
                           categories: Optional[List[str]] = None,
                           custom_filter: Optional[callable] = None,
+                          overwrite: bool = False,
                           **kwargs) -> 'MstmlOrchestrator':
         """
         Apply data filters to already loaded data.
@@ -1386,6 +1448,7 @@ class MstmlOrchestrator:
             date_range: Dict with 'start' and/or 'end' keys (ISO date strings)
             categories: List of category strings to keep
             custom_filter: Custom filter function that takes a DataFrame and returns a filtered DataFrame
+            overwrite: Force reprocessing even if cached data exists
             **kwargs: Additional filter parameters
         
         Returns:
@@ -1404,8 +1467,22 @@ class MstmlOrchestrator:
             orchestrator.apply_data_filters(categories=['cs.AI', 'cs.LG'])
             print(f"After category filter: {len(orchestrator.documents_df)} documents")
         """
+        # Check for cached data with processing status
+        main_df_cache_path = os.path.join(self.experiment_directory, "main_df.pkl")
+        
+        if not overwrite and os.path.exists(main_df_cache_path):
+            status = self._load_processing_status()
+            if status.get('apply_data_filters', False):
+                self.logger.info("Loading cached filtered data from main_df.pkl")
+                self.documents_df = read_pickle(main_df_cache_path)
+                self.logger.info(f"Loaded {len(self.documents_df)} filtered documents from cache")
+                return self
+            elif status.get('load_data', False):
+                self.logger.info("Loading data from main_df.pkl to apply filters")
+                self.documents_df = read_pickle(main_df_cache_path)
+        
         if self.documents_df is None:
-            raise ValueError("No data loaded. Call load_raw_data() first.")
+            raise ValueError("No data loaded. Call load_data() first.")
         
         initial_count = len(self.documents_df)
         self.logger.info(f"Applying filters to {initial_count} documents")
@@ -1481,6 +1558,11 @@ class MstmlOrchestrator:
         if self._pending_data_filters:
             self._pending_data_filters = None
         
+        # Cache filtered data and update processing status
+        self.logger.info("Caching filtered data to main_df.pkl")
+        write_pickle(main_df_cache_path, self.documents_df)
+        self._update_processing_status('apply_data_filters', True)
+        
         return self
     
     def _track_step_params(self, step_name: str, params: dict):
@@ -1497,11 +1579,12 @@ class MstmlOrchestrator:
     
     def _copy_essential_files_to_experiment(self):
         """Copy essential files to experiment directory for reproducibility."""
-        if not hasattr(self, 'data_loader') or not self.data_loader:
+        data_loader = getattr(self, 'data_loader', None) or getattr(self, '_data_loader', None)
+        if not data_loader:
             self.logger.warning("No data loader available - cannot copy essential files")
             return
             
-        clean_dir = self.data_loader.dataset_dirs["clean"]
+        clean_dir = data_loader.dataset_dirs["clean"]
         essential_files = [
             'main_df.pkl',
             'id2word.pkl', 
@@ -1525,7 +1608,8 @@ class MstmlOrchestrator:
     
     def _update_main_dataframe(self):
         """Update main_df.pkl in both clean directory and experiment directory when dataframe is modified."""
-        if not hasattr(self, 'data_loader') or not self.data_loader:
+        data_loader = getattr(self, 'data_loader', None) or getattr(self, '_data_loader', None)
+        if not data_loader:
             self.logger.warning("No data loader available - cannot update main_df.pkl")
             return
             
@@ -1534,7 +1618,7 @@ class MstmlOrchestrator:
             return
         
         # Update in clean directory
-        clean_dir = self.data_loader.dataset_dirs["clean"]
+        clean_dir = data_loader.dataset_dirs["clean"]
         clean_path = os.path.join(clean_dir, 'main_df.pkl')
         write_pickle(clean_path, self.documents_df)
         
@@ -1544,12 +1628,15 @@ class MstmlOrchestrator:
         
         self.logger.info(f"Updated main_df.pkl in both clean directory and experiment directory ({len(self.documents_df)} rows)")
     
-    def apply_author_disambiguation(self) -> 'MstmlOrchestrator':
+    def apply_author_disambiguation(self, overwrite: bool = False) -> 'MstmlOrchestrator':
         """
         Apply author disambiguation to already loaded and filtered data.
         
         This method should be called after load_raw_data() and apply_data_filters()
         to perform author name disambiguation and ID assignment.
+        
+        Args:
+            overwrite: Force reprocessing even if cached data exists
         
         Returns:
             Self for method chaining
@@ -1560,8 +1647,22 @@ class MstmlOrchestrator:
             orchestrator.apply_data_filters(date_range={'start': '2020-01-01', 'end': '2023-12-31'})
             orchestrator.apply_author_disambiguation()
         """
+        # Check for cached data with processing status
+        main_df_cache_path = os.path.join(self.experiment_directory, "main_df.pkl")
+        
+        if not overwrite and os.path.exists(main_df_cache_path):
+            status = self._load_processing_status()
+            if status.get('apply_author_disambiguation', False):
+                self.logger.info("Loading cached disambiguated data from main_df.pkl")
+                self.documents_df = read_pickle(main_df_cache_path)
+                self.logger.info(f"Loaded {len(self.documents_df)} disambiguated documents from cache")
+                return self
+            elif status.get('apply_data_filters', False) or status.get('load_data', False):
+                self.logger.info("Loading data from main_df.pkl to apply author disambiguation")
+                self.documents_df = read_pickle(main_df_cache_path)
+        
         if self.documents_df is None:
-            raise ValueError("No data loaded. Call load_raw_data() first.")
+            raise ValueError("No data loaded. Call load_data() first.")
         
         # Get or create author disambiguator
         disambiguator = self._author_disambiguator
@@ -1592,8 +1693,10 @@ class MstmlOrchestrator:
         final_count = len(self.documents_df)
         self.logger.info(f"Author disambiguation completed on {final_count} documents")
         
-        # Update main_df.pkl with the new author IDs column
-        self._update_main_dataframe()
+        # Cache disambiguated data and update processing status
+        self.logger.info("Caching disambiguated data to main_df.pkl")
+        write_pickle(main_df_cache_path, self.documents_df)
+        self._update_processing_status('apply_author_disambiguation', True)
         
         return self
 
@@ -1631,7 +1734,8 @@ class MstmlOrchestrator:
     def setup_coauthor_network(self, 
                               min_collaborations: Optional[int] = None,
                               temporal: Optional[bool] = None,
-                              degree_limits: Optional[tuple] = None) -> 'MstmlOrchestrator':
+                              degree_limits: Optional[tuple] = None,
+                              overwrite: bool = False) -> 'MstmlOrchestrator':
         """
         Create co-author network from loaded document data using _graph_driver functions.
         Authors should already be disambiguated from the load_data step.
@@ -1640,12 +1744,26 @@ class MstmlOrchestrator:
             min_collaborations: Minimum collaborations to include edge (overrides config)
             temporal: Whether to build temporal networks and compose them (overrides config)
             degree_limits: Optional (min_degree, max_degree) tuple to filter nodes (overrides config)
+            overwrite: Force rebuilding even if cached network exists
         
         Returns:
             Self for method chaining
         """
         if self.documents_df is None:
             raise ValueError("No documents loaded. Call load_data() first.")
+        
+        # Check for cached coauthor network in data folder
+        data_loader = getattr(self, 'data_loader', None) or getattr(self, '_data_loader', None)
+        if data_loader:
+            networks_dir = data_loader.dataset_dirs["networks"]
+            dataset_name = getattr(data_loader, '_dataset_name', 'unknown')
+            network_cache_path = os.path.join(networks_dir, f"{dataset_name}_coauthor_network.graphml")
+            
+            if not overwrite and os.path.exists(network_cache_path):
+                self.logger.info(f"Loading cached coauthor network from {network_cache_path}")
+                self.coauthor_network = nx.read_graphml(network_cache_path)
+                self.logger.info(f"Loaded coauthor network: {self.coauthor_network.number_of_nodes()} nodes, {self.coauthor_network.number_of_edges()} edges")
+                return self
         
         # Get config defaults and apply parameter overrides
         network_config = self.config['coauthor_network']
@@ -1657,8 +1775,8 @@ class MstmlOrchestrator:
         
         if temporal and MainDataSchema.DATE.colname in self.documents_df.columns:
             # Set up save directories and dataset name
-            dataset_name = getattr(self.data_loader, '_dataset_name', 'unknown')
-            networks_dir = self.data_loader.dataset_dirs["networks"]
+            dataset_name = getattr(data_loader, '_dataset_name', 'unknown')
+            networks_dir = data_loader.dataset_dirs["networks"]
             
             # Build temporal networks and compose them
             self.logger.info("Building temporal co-author networks")
@@ -1711,8 +1829,8 @@ class MstmlOrchestrator:
                 self.logger.info(f"Removed {len(nodes_to_remove)} nodes due to degree limits {degree_limits}")
             
             # Save single network
-            dataset_name = getattr(self.data_loader, '_dataset_name', 'unknown')
-            networks_dir = self.data_loader.dataset_dirs["networks"]
+            dataset_name = getattr(data_loader, '_dataset_name', 'unknown')
+            networks_dir = data_loader.dataset_dirs["networks"]
             os.makedirs(networks_dir, exist_ok=True)
             
             network_filename = f"{dataset_name}_coauthor_network.graphml"
@@ -1736,6 +1854,17 @@ class MstmlOrchestrator:
             f"(min_collaborations={min_collaborations})"
         )
         
+        # Cache the coauthor network to data folder
+        data_loader = getattr(self, 'data_loader', None) or getattr(self, '_data_loader', None)
+        if data_loader:
+            networks_dir = data_loader.dataset_dirs["networks"]
+            dataset_name = getattr(data_loader, '_dataset_name', 'unknown')
+            network_cache_path = os.path.join(networks_dir, f"{dataset_name}_coauthor_network.graphml")
+            
+            os.makedirs(networks_dir, exist_ok=True)
+            nx.write_graphml(self.coauthor_network, network_cache_path)
+            self.logger.info(f"Cached coauthor network to {network_cache_path}")
+        
         return self
     
     # ========================================================================================
@@ -1749,6 +1878,7 @@ class MstmlOrchestrator:
                        extra_stopwords: Optional[List[str]] = None,
                        train_lda: Optional[bool] = None,
                        num_topics: Optional[int] = None,
+                       overwrite: bool = False,
                        lda_passes: Optional[int] = None,
                        lambda_param: Optional[float] = None,
                        top_n_terms: Optional[int] = None) -> 'MstmlOrchestrator':
@@ -1764,6 +1894,7 @@ class MstmlOrchestrator:
             extra_stopwords: Additional stopwords to remove
             train_lda: Whether to train LDA model for relevancy filtering (overrides config)
             num_topics: Number of topics for LDA model (overrides config)
+            overwrite: Force reprocessing even if cached data exists
             lda_passes: Number of passes for LDA training (overrides config)
             lambda_param: Lambda parameter for relevancy scoring (overrides config)
             top_n_terms: Number of top relevant terms to keep (overrides config)
@@ -1771,8 +1902,31 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
+        # Check for cached preprocessed data first  
+        main_df_cache_path = os.path.join(self.experiment_directory, "main_df.pkl")
+        vocab_cache_path = os.path.join(self.experiment_directory, "vocabulary.pkl")
+        bow_cache_path = os.path.join(self.experiment_directory, "bow_corpus.pkl")
+        
+        if not overwrite and os.path.exists(main_df_cache_path) and os.path.exists(vocab_cache_path) and os.path.exists(bow_cache_path):
+            status = self._load_processing_status()
+            if status.get('preprocess_text', False):
+                self.logger.info("Loading cached preprocessed data from main_df.pkl, vocabulary.pkl, and bow_corpus.pkl")
+                self.documents_df = read_pickle(main_df_cache_path)
+                self.vocabulary = read_pickle(vocab_cache_path)
+                self.bow_corpus = read_pickle(bow_cache_path)
+                self.logger.info(f"Loaded preprocessed data: {len(self.documents_df)} documents, {len(self.vocabulary)} vocabulary terms")
+                return self
+        
+        # If no cached preprocessed data, try to load from main_df.pkl
         if self.documents_df is None:
-            raise ValueError("No documents loaded. Call load_data() first.")
+            if os.path.exists(main_df_cache_path):
+                status = self._load_processing_status()
+                if status.get('apply_author_disambiguation', False) or status.get('apply_data_filters', False) or status.get('load_data', False):
+                    self.logger.info("Loading data from main_df.pkl to apply preprocessing")
+                    self.documents_df = read_pickle(main_df_cache_path)
+            
+            if self.documents_df is None:
+                raise ValueError("No data loaded. Call load_data() first.")
         
         # Get config defaults and apply parameter overrides
         vocab_config = self.config['text_processing']['vocabulary_filtering']
@@ -1847,18 +2001,58 @@ class MstmlOrchestrator:
         self._save_preprocessing_results()
         self._copy_essential_files_to_experiment()
         
-        # Update main_df.pkl with the new preprocessed_text column
-        self._update_main_dataframe()
+        # Cache preprocessing results to experiment directory
+        self.logger.info("Caching preprocessing results to main_df.pkl")
+        main_df_cache_path = os.path.join(self.experiment_directory, "main_df.pkl")
+        write_pickle(main_df_cache_path, self.documents_df)
+        write_pickle(vocab_cache_path, self.vocabulary)
+        write_pickle(bow_cache_path, self.bow_corpus)
+        self._update_processing_status('preprocess_text', True)
         
         return self
     
+    def _load_processing_status(self) -> dict:
+        """Load processing status from cache."""
+        status_path = os.path.join(self.experiment_directory, "processing_status.json")
+        if os.path.exists(status_path):
+            with open(status_path, 'r') as f:
+                return json.load(f)
+        return {}
+    
+    def _update_processing_status(self, step_name: str, completed: bool):
+        """Update processing status for a specific step."""
+        status_path = os.path.join(self.experiment_directory, "processing_status.json")
+        status = self._load_processing_status()
+        status[step_name] = completed
+        
+        with open(status_path, 'w') as f:
+            json.dump(status, f, indent=2)
+    
+    def _reset_processing_status_from(self, step_name: str):
+        """Reset processing status for this step and all dependent steps."""
+        status = self._load_processing_status()
+        
+        # Define step dependencies (later steps depend on earlier ones)
+        step_order = ['load_data', 'apply_data_filters', 'apply_author_disambiguation', 'preprocess_text']
+        
+        if step_name in step_order:
+            reset_index = step_order.index(step_name)
+            for step in step_order[reset_index:]:
+                if step in status:
+                    status[step] = False
+        
+        status_path = os.path.join(self.experiment_directory, "processing_status.json")
+        with open(status_path, 'w') as f:
+            json.dump(status, f, indent=2)
+    
     def _save_preprocessing_results(self):
         """Save only essential preprocessing results to data/clean/ directory."""
-        if not hasattr(self, 'data_loader') or not self.data_loader:
+        data_loader = getattr(self, 'data_loader', None) or getattr(self, '_data_loader', None)
+        if not data_loader:
             self.logger.warning("No data loader available - cannot save preprocessing results")
             return
             
-        clean_dir = self.data_loader.dataset_dirs["clean"]
+        clean_dir = data_loader.dataset_dirs["clean"]
         
         # Save only the vocabulary dictionary (essential for reproducibility)
         dict_path = os.path.join(clean_dir, 'id2word.pkl')
@@ -1875,7 +2069,8 @@ class MstmlOrchestrator:
                              temporal_smoothing_decay: Optional[float] = None,
                              save_statistics: Optional[bool] = None,
                              create_plot: Optional[bool] = None,
-                             save_plot: Optional[bool] = None) -> 'MstmlOrchestrator':
+                             save_plot: Optional[bool] = None,
+                             overwrite: bool = False) -> 'MstmlOrchestrator':
         """
         Split corpus into temporal chunks for ensemble learning.
         
@@ -1885,10 +2080,19 @@ class MstmlOrchestrator:
             save_statistics: Whether to save chunk statistics to file (overrides config)
             create_plot: Whether to create a visualization of chunk sizes (overrides config)
             save_plot: Whether to save the plot to file (overrides config)
+            overwrite: Force recreating chunks even if cached chunks exist
         
         Returns:
             Self for method chaining
         """
+        # Check for cached temporal chunks
+        chunks_cache_path = os.path.join(self.experiment_directory, "time_chunks.pkl")
+        if not overwrite and os.path.exists(chunks_cache_path):
+            self.logger.info("Loading cached temporal chunks from time_chunks.pkl")
+            self.time_chunks = read_pickle(chunks_cache_path)
+            self.logger.info(f"Loaded {len(self.time_chunks)} temporal chunks from cache")
+            return self
+        
         if self.documents_df is None:
             raise ValueError("No documents loaded. Call load_data() first.")
         
@@ -1949,6 +2153,10 @@ class MstmlOrchestrator:
             # Create and optionally save plot
             if create_plot:
                 self._create_chunk_plot(months_per_chunk, chunk_sizes, save_plot)
+        
+        # Cache temporal chunks to experiment directory
+        self.logger.info("Caching temporal chunks")
+        write_pickle(chunks_cache_path, self.time_chunks)
         
         return self
     
@@ -2120,15 +2328,59 @@ class MstmlOrchestrator:
                               base_model: Optional[str] = None,
                               topics_per_chunk: Optional[int] = None,
                               docs_per_topic: Optional[int] = None,
-                              model_params: Optional[dict] = None) -> 'MstmlOrchestrator':
+                              model_params: Optional[dict] = None,
+                              overwrite: bool = False) -> 'MstmlOrchestrator':
         """
         Train ensemble of topic models on temporal chunks.
+        
+        This method orchestrates the complete training pipeline:
+        1. Train chunk topic models (with caching)
+        2. Build author-document distributions 
+        3. Apply diffusion process
         
         Args:
             base_model: Base topic model type ('LDA', 'T-LDA', etc.) (overrides config)
             topics_per_chunk: Number of topics per chunk model (overrides automatic calculation)
             docs_per_topic: Target number of documents per topic for automatic calculation (overrides config)
             model_params: Additional model parameters
+            overwrite: Force retraining even if cached models exist
+        
+        Returns:
+            Self for method chaining
+        """
+        
+        # Step 1: Train chunk models (with caching)
+        self.train_chunk_models(
+            base_model=base_model,
+            topics_per_chunk=topics_per_chunk,
+            docs_per_topic=docs_per_topic,
+            model_params=model_params,
+            overwrite=overwrite
+        )
+        
+        # Step 2: Build author-document distributions
+        self.build_author_document_distributions(overwrite=overwrite)
+        
+        # Step 3: Apply diffusion
+        self.apply_diffusion(overwrite=overwrite)
+        
+        return self
+
+    def train_chunk_models(self,
+                          base_model: Optional[str] = None,
+                          topics_per_chunk: Optional[int] = None,
+                          docs_per_topic: Optional[int] = None,
+                          model_params: Optional[dict] = None,
+                          overwrite: bool = False) -> 'MstmlOrchestrator':
+        """
+        Train topic models for each temporal chunk.
+        
+        Args:
+            base_model: Base topic model type ('LDA', 'T-LDA', etc.) (overrides config)
+            topics_per_chunk: Number of topics per chunk model (overrides automatic calculation)
+            docs_per_topic: Target number of documents per topic for automatic calculation (overrides config)
+            model_params: Additional model parameters
+            overwrite: Force retraining even if cached models exist
         
         Returns:
             Self for method chaining
@@ -2141,6 +2393,18 @@ class MstmlOrchestrator:
             MainDataSchema.PREPROCESSED_TEXT.colname not in self.documents_df.columns or
             self.bow_corpus is None):
             raise ValueError("No preprocessed corpus available. Call preprocess_text() first.")
+        
+        # Check for cached models
+        models_cache_path = os.path.join(self.experiment_directory, "chunk_topic_models.pkl")
+        topics_cache_path = os.path.join(self.experiment_directory, "chunk_topics.pkl")
+        vectors_cache_path = os.path.join(self.experiment_directory, "topic_vectors.npy")
+        
+        if not overwrite and os.path.exists(models_cache_path) and os.path.exists(topics_cache_path) and os.path.exists(vectors_cache_path):
+            self.logger.info("Loading cached chunk topic models")
+            self.chunk_topic_models = read_pickle(models_cache_path)
+            self.chunk_topics = read_pickle(topics_cache_path)
+            self.topic_vectors = np.load(vectors_cache_path)
+            return self
         
         # Get config defaults and apply parameter overrides
         topic_config = self.config['topic_model']
@@ -2292,21 +2556,48 @@ class MstmlOrchestrator:
             f"average perplexity: {avg_perplexity:.2f} (lower is better)"
         )
         
-        # Build the document-topic distribution and author processing pipeline
-        self._build_author_document_distributions()
+        # Cache the trained models and vectors
+        self.logger.info("Caching chunk topic models")
+        write_pickle(models_cache_path, self.chunk_topic_models)
+        write_pickle(topics_cache_path, self.chunk_topics)
+        np.save(vectors_cache_path, self.topic_vectors)
         
         return self
     
-    def _build_author_document_distributions(self) -> None:
+    def build_author_document_distributions(self, overwrite: bool = False) -> 'MstmlOrchestrator':
         """
-        Build document-topic and author-topic distributions with diffusion processing.
+        Build document-topic and author-topic distributions.
         
-        This implements the core document → expanded → author → diffusion pipeline:
+        This implements the core document → expanded → author pipeline:
         1. Collect document-topic distributions from all chunk models
         2. Expand distributions to full chunk topic space
         3. Compute author barycenters with inverse author count weighting
-        4. Create diffusion KNN graph and apply diffusion process
+        
+        Args:
+            overwrite: Force rebuilding even if cached distributions exist
+            
+        Returns:
+            Self for method chaining
         """
+        
+        if not self.chunk_topic_models:
+            raise ValueError("No chunk topic models available. Call train_chunk_models() first.")
+        
+        # Check for cached distributions
+        expanded_docs_cache_path = os.path.join(self.experiment_directory, "expanded_doc_topic_distns.pkl")
+        author_barycenters_cache_path = os.path.join(self.experiment_directory, "author_topic_barycenters.pkl")
+        
+        if not overwrite and os.path.exists(expanded_docs_cache_path) and os.path.exists(author_barycenters_cache_path):
+            self.logger.info("Loading cached author-document distributions")
+            self.expanded_doc_topic_distns = read_pickle(expanded_docs_cache_path)
+            self.author_topic_barycenters = read_pickle(author_barycenters_cache_path)
+            additional_cache_path = os.path.join(self.experiment_directory, "author_doc_metadata.pkl")
+            if os.path.exists(additional_cache_path):
+                cached_metadata = read_pickle(additional_cache_path)
+                self.authId_to_docs = cached_metadata['authId_to_docs']
+                self.authId2docweights = cached_metadata['authId2docweights']
+            return self
+        
         self.logger.info("Building author-document distribution pipeline")
         
         # Step 1: Collect document-topic distributions from chunk models
@@ -2345,15 +2636,65 @@ class MstmlOrchestrator:
         if not self.author_topic_barycenters:
             raise ValueError("No author barycenters computed. Check author data in documents_df.")
         
-        # Step 4: Create diffusion KNN graph and apply diffusion
-        self._create_diffusion_knn_graph()
+        # Cache the distributions
+        self.logger.info("Caching author-document distributions")
+        write_pickle(expanded_docs_cache_path, self.expanded_doc_topic_distns)
+        write_pickle(author_barycenters_cache_path, self.author_topic_barycenters)
+        additional_metadata = {
+            'authId_to_docs': self.authId_to_docs,
+            'authId2docweights': self.authId2docweights
+        }
+        additional_cache_path = os.path.join(self.experiment_directory, "author_doc_metadata.pkl")
+        write_pickle(additional_cache_path, additional_metadata)
         
         self.logger.info(
             f"Author-document pipeline complete: "
             f"{len(self.expanded_doc_topic_distns)} documents, "
-            f"{len(self.author_topic_barycenters)} authors, "
-            f"diffusion applied with {self.config['author_doc_embeddings']['ct_distn_diffusion_knnk']} neighbors"
+            f"{len(self.author_topic_barycenters)} authors"
         )
+        
+        return self
+    
+    def apply_diffusion(self, overwrite: bool = False) -> 'MstmlOrchestrator':
+        """
+        Apply diffusion process to author and document distributions.
+        
+        Args:
+            overwrite: Force rebuilding even if cached diffusion results exist
+            
+        Returns:
+            Self for method chaining
+        """
+        
+        if not hasattr(self, 'expanded_doc_topic_distns') or not hasattr(self, 'author_topic_barycenters'):
+            raise ValueError("No author-document distributions available. Call build_author_document_distributions() first.")
+        
+        if not hasattr(self, 'topic_vectors') or self.topic_vectors is None:
+            raise ValueError("No topic vectors available. Call train_chunk_models() first.")
+        
+        # Check for cached diffusion results
+        author_ct_cache_path = os.path.join(self.experiment_directory, "author_ct_distns.pkl")
+        doc_ct_cache_path = os.path.join(self.experiment_directory, "doc_ct_distns.pkl")
+        diffusion_matrix_cache_path = os.path.join(self.experiment_directory, "diffusion_matrix.pkl")
+        
+        if not overwrite and os.path.exists(author_ct_cache_path) and os.path.exists(doc_ct_cache_path):
+            self.logger.info("Loading cached diffusion results")
+            self.author_ct_distns = read_pickle(author_ct_cache_path)
+            self.doc_ct_distns = read_pickle(doc_ct_cache_path)
+            if os.path.exists(diffusion_matrix_cache_path):
+                self.diffusion_matrix = read_pickle(diffusion_matrix_cache_path)
+            return self
+        
+        # Create diffusion KNN graph and apply diffusion process
+        self._create_diffusion_knn_graph()
+        
+        # Cache the diffusion results
+        self.logger.info("Caching diffusion results")
+        write_pickle(author_ct_cache_path, self.author_ct_distns)
+        write_pickle(doc_ct_cache_path, self.doc_ct_distns)
+        write_pickle(diffusion_matrix_cache_path, self.diffusion_matrix)
+        
+        return self
     
     def _create_diffusion_knn_graph(self) -> None:
         """
@@ -2395,7 +2736,6 @@ class MstmlOrchestrator:
         except (ImportError, Exception) as e:
             self.logger.warning(f"FAISS not available for diffusion KNN: {e}. Using scipy fallback")
             # Fallback to scipy for small datasets
-            from scipy.spatial.distance import pdist, squareform
             
             # Apply sqrt transformation for Hellinger distance
             sqrt_topic_vectors = np.sqrt(self.topic_vectors).astype(np.float32)
@@ -2418,41 +2758,29 @@ class MstmlOrchestrator:
             indices = np.array(indices)
             distances = np.array(distances)
         
-        # Construct NetworkX graph using SMALL k for diffusion (like reference code)
-        self.knn_chunk_topic_graph = nx.Graph()
+        # Build sparse diffusion matrix for efficient matrix-based operations
         num_topics = len(self.topic_vectors)
+        self.diffusion_matrix = build_diffusion_matrix(indices, distances, num_topics, diffusion_knnk)
         
-        # Add all nodes
-        self.knn_chunk_topic_graph.add_nodes_from(range(num_topics))
-        
-        # Add edges using ONLY the first diffusion_knnk neighbors (skip first index which is self)
-        for i in range(num_topics):
-            max_neighbors = min(diffusion_knnk + 1, indices.shape[1])
-            for j in range(1, max_neighbors):  # Start from 1 to skip self
-                if j < indices.shape[1]:
-                    neighbor_idx = indices[i, j]
-                    distance = float(distances[i, j])
-                    self.knn_chunk_topic_graph.add_edge(i, neighbor_idx, weight=distance)
-        
-        # Apply diffusion to author and document distributions (following reference implementation)
+        # Apply diffusion to author and document distributions
         self.logger.info("Applying diffusion to author and document distributions")
         
         # Get diffusion parameters from config  
         num_iterations = self.config['author_doc_embeddings']['num_diffusion_iterations']
         diffusion_rate = self.config['author_doc_embeddings']['diffusion_rate']
         
-        # Process authors (like reference code - simple sequential loop)
+        # Process authors using matrix-based diffusion
         self.author_ct_distns = {}
         for author_id, barycenter in self.author_topic_barycenters.items():
-            self.author_ct_distns[author_id] = diffuse_distribution(
-                self.knn_chunk_topic_graph, barycenter, num_iterations, diffusion_rate
+            self.author_ct_distns[author_id] = diffuse_distribution_matrix(
+                self.diffusion_matrix, barycenter, num_iterations, diffusion_rate
             )
         
-        # Process documents (like reference code - simple sequential loop) 
+        # Process documents using matrix-based diffusion
         self.doc_ct_distns = {}
         for doc_id, distribution in self.expanded_doc_topic_distns.items():
-            self.doc_ct_distns[doc_id] = diffuse_distribution(
-                self.knn_chunk_topic_graph, distribution, num_iterations, diffusion_rate
+            self.doc_ct_distns[doc_id] = diffuse_distribution_matrix(
+                self.diffusion_matrix, distribution, num_iterations, diffusion_rate
             )
     
     # ========================================================================================
@@ -2478,7 +2806,7 @@ class MstmlOrchestrator:
         """
         
         if self.topic_vectors is None:
-            raise ValueError("No topic vectors available. Call train_ensemble_models() first.")
+            raise ValueError("No topic vectors available. Call train_chunk_models() first.")
         
         # Get config defaults and apply parameter overrides
         distance_config = self.config['distance_metric']
@@ -2616,7 +2944,7 @@ class MstmlOrchestrator:
         """
         
         if self.topic_vectors is None:
-            raise ValueError("No topic vectors available. Call train_ensemble_models() first.")
+            raise ValueError("No topic vectors available. Call train_chunk_models() first.")
         
         # Get config defaults and apply parameter overrides
         clustering_config = self.config['clustering']
@@ -3107,7 +3435,7 @@ class MstmlOrchestrator:
         """
         
         if self.topic_vectors is None:
-            raise ValueError("No topic vectors available. Call train_ensemble_models() first.")
+            raise ValueError("No topic vectors available. Call train_chunk_models() first.")
         
         # Validate linkage method
         VALID_LINKAGE_METHODS = ['ward', 'single', 'complete', 'average', 'weighted', 'centroid', 'median']

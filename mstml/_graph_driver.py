@@ -51,10 +51,14 @@ def build_coauthor_network_from_dataframe(df, author_names_col, author_ids_col=N
         else:
             authors = row.get(author_names_col, [])
         
-        # Ensure we have a list
-        if isinstance(authors, str):
+        # Handle None values and ensure we have a list
+        if authors is None:
+            authors = []
+        elif isinstance(authors, str):
             authors = [authors]
-        authors = [str(a) for a in authors if a]
+        
+        # Filter out None/empty values and convert to strings
+        authors = [str(a) for a in authors if a is not None and str(a).strip()]
         
         # Track author-document relationships
         for author in authors:
@@ -150,8 +154,6 @@ def compose_networks_from_dict(year_networks, d_lims=None, save_path=None):
     Returns:
         Composed NetworkX Graph
     """
-    import networkx as nx
-    
     # Start with empty graph
     composed_graph = nx.Graph()
     
