@@ -49,7 +49,7 @@ def get_data_int_dir(dset, dsub, create=False):
     return int_dir
 
 
-def get_data_original_dir(dset="news20"):
+def get_data_original_dir(dset):
     base_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir, "data", dset))
     original_dir = os.path.join(base_dir, "original")
     return original_dir
@@ -63,7 +63,7 @@ def get_data_clean_dir(dset, dsub):
     return os.path.join(base_dir, "clean/")
 
 
-def get_data_intermediate_dir(dset="news20", dsub=None):
+def get_data_intermediate_dir(dset, dsub=None):
     base_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir, "data", dset))
     intermediate_dir = os.path.join(base_dir, "intermediate")
     if dsub:
@@ -71,11 +71,27 @@ def get_data_intermediate_dir(dset="news20", dsub=None):
     return intermediate_dir
 
 
-def get_data_networks_dir(dset="news20", dsub=None):
+def get_data_networks_dir(dset, dsub=None, create=False):
+    """
+    Get networks directory for a dataset.
+    
+    Args:
+        dset: Dataset name (e.g., 'arxiv', 'news20')  
+        dsub: Optional subdirectory within networks
+        create: Whether to create the directory if it doesn't exist
+        
+    Returns:
+        str: Path to the networks directory
+    """
     base_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir, "data", dset))
     networks_dir = os.path.join(base_dir, "networks")
     if dsub:
         networks_dir = os.path.join(networks_dir, dsub)
+    
+    # Create directory if requested
+    if create and not os.path.exists(networks_dir):
+        os.makedirs(networks_dir)
+        
     return networks_dir
 
 

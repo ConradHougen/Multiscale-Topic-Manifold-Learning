@@ -34,44 +34,72 @@ The `build.py` script will:
 - **Python 3.7+**
 - **C Compiler** (GCC, Clang, or MSVC)
 - **Conda or Miniconda** (recommended for dependency management)
+- **FAISS** (Facebook AI Similarity Search - required for performance)
 
 ### Performance Note
 MSTML includes Cython extensions for optimal performance. The `fast_encode_tree` module provides 5-50x speedup for hierarchical operations. If compilation fails, the framework will fall back to pure Python implementations with a performance warning.
+
+FAISS is used for efficient k-nearest neighbor search in high-dimensional topic spaces, providing significant performance improvements over scipy implementations for large datasets. FAISS acceleration reduces topic manifold construction from O(n²) to O(nk) complexity.
 
 ## Quick Start
 
 ### Basic Usage
 
 ```python
+import os
 from mstml.core import MstmlOrchestrator
 
-# Create orchestrator for your dataset
-orchestrator = MstmlOrchestrator("arxiv")
+# Set dataset name (matches directory name within data/)
+dataset_name = "arxiv"
 
-# Configure data filters for AI/ML papers from 2020-2023
-orchestrator.configure_data_filters(
-    date_range={'start': '2020-01-01', 'end': '2023-12-31'},
-    categories=['cs.AI', 'cs.LG', 'stat.ML', 'cs.CL']
+# Define data filters for categories of interest
+data_filters = {
+    'categories': [
+        'stat.AP', 'stat.CO', 'stat.ME', 'stat.OT', 'stat.TH',
+        'cs.LG'
+    ]
+}
+
+# Define schema mapping for your data format
+arxiv_schema_map = {
+    'abstract': 'raw_text',
+    'update_date': 'date', 
+    'authors_parsed': 'authors'
+}
+
+# Create orchestrator with experiment directory
+orch = MstmlOrchestrator(
+    dataset_name=dataset_name,
+    experiment_name="gdltm",
+    experiment_directory=os.path.join(os.pardir, 'experiments', 'gdltm_test1')
+)
+
+# Configure data filtering parameters
+orch.configure_data_filters(
+    date_range={'start': '2012-01-01', 'end': '2023-12-31'},
+    categories=data_filters['categories']
 )
 
 # Run complete analysis pipeline
-orchestrator.load_data()
-orchestrator.preprocess_text()
-orchestrator.setup_coauthor_network()
-orchestrator.create_temporal_chunks(months_per_chunk=6)
-orchestrator.train_ensemble_models()
-orchestrator.build_topic_manifold()
+orch.load_raw_data(input_schema_map=arxiv_schema_map, overwrite=False)
+orch.apply_data_filters()                            # Apply configured filters
+orch.preprocess_text()                               # Clean and process text
+orch.apply_author_disambiguation()                   # Disambiguate author names
+orch.setup_coauthor_network(temporal=True)           # Build temporal co-author network
+orch.create_temporal_chunks(months_per_chunk=1,      # Create monthly time chunks
+                           temporal_smoothing_decay=0.75)
+orch.train_chunk_models(overwrite=False)             # Train LDA models per chunk
+orch.build_author_document_distributions()          # Build author-topic distributions
+orch.apply_diffusion()                              # Apply diffusion to topic distributions
+orch.build_topic_manifold()                        # Build topic similarity graph + dendrogram
 
-# Compute interdisciplinarity scores
-orchestrator.compute_interdisciplinarity_scores_docs()
-orchestrator.compute_interdisciplinarity_scores_authors()
+# Create and visualize topic space embedding with PHATE
+orch.create_topic_embedding(cut_height=0.7)
+orch.display_topic_embedding(color_by='meta_topic')
+orch.save_topic_embedding()
 
-# Create and save topic space embedding
-orchestrator.create_topic_embedding(method='phate', cut_height=0.5)
-orchestrator.display_topic_embedding(save_path='topic_embedding.png')
-
-# Save results
-results_path = orchestrator.finalize_experiment()
+# Save all results
+results_path = orch.finalize_experiment()
 print(f"Analysis complete! Results saved to: {results_path}")
 ```
 
@@ -92,6 +120,13 @@ author_disambiguator = AuthorDisambiguator(
     max_authors_per_doc=15     # Skip documents with too many authors
 )
 
+# Define schema mapping for your data format
+arxiv_schema_map = {
+    'abstract': 'raw_text',
+    'update_date': 'date', 
+    'authors_parsed': 'authors'
+}
+
 # Create orchestrator with pre-configured components
 orchestrator = MstmlOrchestrator(
     dataset_name="arxiv",
@@ -99,6 +134,17 @@ orchestrator = MstmlOrchestrator(
     text_preprocessor=text_preprocessor,
     author_disambiguator=author_disambiguator
 )
+
+# Configure data filtering with advanced options
+orchestrator.configure_data_filters(
+    date_range={'start': '2010-01-01', 'end': '2023-12-31'},
+    categories=['cs.LG', 'stat.ML', 'cs.AI'],
+    custom_filter=lambda doc: len(doc.get('authors', [])) <= 10
+)
+
+# Load and filter data
+orchestrator.load_raw_data(input_schema_map=arxiv_schema_map, overwrite=False)
+orchestrator.apply_data_filters()
 
 # Advanced text preprocessing options
 orchestrator.preprocess_text(
@@ -108,21 +154,42 @@ orchestrator.preprocess_text(
     top_n_terms=2500           # Final vocabulary size
 )
 
-# Advanced topic embedding and interdisciplinarity analysis
-orchestrator.build_topic_manifold()
+# Apply author disambiguation with custom parameters
+orchestrator.apply_author_disambiguation()
 
-# Compute interdisciplinarity scores with custom parameters
-orchestrator.compute_interdisciplinarity_scores_docs(
-    entropy_weighting=True,
-    author_publication_weighting=True,
-    topn=100  # Get top 100 most interdisciplinary documents
+# Configure collaboration network
+orchestrator.setup_coauthor_network(
+    min_collaborations=2,
+    temporal=True,
+    degree_limits=(2, 50)
 )
 
-orchestrator.compute_interdisciplinarity_scores_authors(
-    entropy_weighting=True,
-    publication_count_weighting=True,
-    top_topics_threshold=5,    # Consider only top 5 topics per author
-    topn=50                    # Get top 50 most interdisciplinary authors
+# Create temporal chunks with custom parameters
+orchestrator.create_temporal_chunks(
+    months_per_chunk=1,
+    temporal_smoothing_decay=0.8
+)
+
+# Train models with custom parameters
+orchestrator.train_chunk_models(
+    base_model='LDA',
+    num_topics=50,
+    passes=10,
+    alpha='symmetric',
+    beta='auto'
+)
+
+# Build author-document topic distributions
+orchestrator.build_author_document_distributions()
+
+# Apply diffusion to smooth topic distributions
+orchestrator.apply_diffusion()
+
+# Build topic manifold with FAISS acceleration
+orchestrator.build_topic_manifold(
+    linkage_method='ward',
+    distance_metric='hellinger',
+    knn_neighbors=50
 )
 
 # Create topic embeddings with different methods
@@ -131,14 +198,16 @@ orchestrator.create_topic_embedding(
     method='phate',
     n_components=2,
     cut_height=0.5,           # Cut dendrogram to create meta-topics
-    color_by='meta_topic'
+    knn=15,
+    n_pca=100
 )
 
 # Alternative: UMAP embedding (faster, good for large datasets)
 orchestrator.create_topic_embedding(
     method='umap',
     n_components=2,
-    knn_neighbors=15,
+    cut_height=0.5,
+    n_neighbors=15,
     min_dist=0.1
 )
 
@@ -146,13 +215,24 @@ orchestrator.create_topic_embedding(
 orchestrator.create_topic_embedding(
     method='tsne',
     n_components=2,
+    cut_height=0.5,
     perplexity=30
 )
 
 # Display and save visualizations
 orchestrator.display_topic_embedding(
+    color_by='meta_topic',
     title='Topic Space Embedding - Meta-Topic Clusters',
-    save_path='topic_space_embedding.png'
+    save_path='topic_space_embedding.png',
+    figure_size=(12, 8),
+    elevation=45,
+    azimuth=60
+)
+
+# Save embedding data
+orchestrator.save_topic_embedding(
+    filename='topic_embedding_complete.pkl',
+    save_format=['pickle', 'csv', 'json']
 )
 ```
 

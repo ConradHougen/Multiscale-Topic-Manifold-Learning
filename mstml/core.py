@@ -34,11 +34,6 @@ try:
 except ImportError:
     PHATE_AVAILABLE = False
 
-try:
-    import faiss
-    FAISS_AVAILABLE = True
-except ImportError:
-    FAISS_AVAILABLE = False
 
 try:
     import umap
@@ -53,7 +48,6 @@ from scipy.spatial.distance import pdist, squareform
 from scipy.cluster.hierarchy import linkage, dendrogram, fcluster
 from scipy.stats import entropy
 from collections import OrderedDict
-from scipy.cluster.hierarchy import fcluster
 from sklearn.manifold import TSNE
 from abc import ABC, abstractmethod
 from sklearn.decomposition import PCA
@@ -688,13 +682,6 @@ def create_embedding_method(method_type: str = 'PHATE', **kwargs) -> LowDimEmbed
         raise ValueError(f"Unknown embedding method type: {method_type}")
 
 
-# Backwards compatibility aliases for existing code
-def create_phate_embedding(*args, **kwargs):
-    """Backwards compatibility alias for create_topic_embedding."""
-    # This would be implemented at the orchestrator level
-    pass
-
-
 """============================================================================
 class MstmlOrchestrator
 
@@ -849,7 +836,119 @@ class MstmlOrchestrator:
         self.embed_params = {}
         self.embed_figure = None
         
+        # Pipeline dependency management
+        self._setup_dependency_system()
+        
         self.logger.info("MstmlOrchestrator initialized")
+
+    def _setup_dependency_system(self):
+        """Initialize the pipeline dependency tracking system."""
+        # Method completion tracking
+        self.method_completion = {}
+        
+        # Dependency declarations: method_name -> {depends_on: [methods], cache_files: [files]}
+        self.pipeline_dependencies = {
+            'load_raw_data': {
+                'depends_on': [],
+                'cache_files': ['main_df.pkl', 'data_loader.pkl']
+            },
+            'apply_data_filters': {
+                'depends_on': ['load_raw_data'], 
+                'cache_files': ['main_df.pkl']
+            },
+            'preprocess_text': {
+                'depends_on': ['apply_data_filters'],
+                'cache_files': ['main_df.pkl', 'vocabulary.pkl', 'bow_corpus.pkl']
+            },
+            'apply_author_disambiguation': {
+                'depends_on': ['apply_data_filters'],
+                'cache_files': ['main_df.pkl']
+            },
+            'setup_coauthor_network': {
+                'depends_on': ['apply_author_disambiguation'],
+                'cache_files': ['coauthor_network.graphml']
+            },
+            'create_temporal_chunks': {
+                'depends_on': ['apply_data_filters'],
+                'cache_files': ['time_chunks.pkl']
+            },
+            'train_chunk_models': {
+                'depends_on': ['preprocess_text', 'create_temporal_chunks'],
+                'cache_files': ['chunk_topic_models.pkl', 'chunk_topics.pkl']
+            },
+            'build_author_document_distributions': {
+                'depends_on': ['train_chunk_models'],
+                'cache_files': ['expanded_doc_topic_distns.pkl', 'author_topic_barycenters.pkl', 'author_doc_metadata.pkl']
+            },
+            'apply_diffusion': {
+                'depends_on': ['build_author_document_distributions'],
+                'cache_files': ['author_ct_distns.pkl', 'doc_ct_distns.pkl', 'diffusion_matrix.pkl']
+            },
+            'build_topic_manifold': {
+                'depends_on': ['train_chunk_models', 'setup_coauthor_network', 'apply_diffusion'],
+                'cache_files': ['enhanced_dendrogram.pkl']
+            },
+            'create_topic_embedding': {
+                'depends_on': ['build_topic_manifold'],
+                'cache_files': ['topic_embedding.pkl']
+            }
+        }
+    
+    def _get_downstream_methods(self, method_name: str) -> List[str]:
+        """Get all methods that transitively depend on the given method."""
+        downstream = []
+        visited = set()
+        
+        def find_dependents(current_method):
+            if current_method in visited:
+                return
+            visited.add(current_method)
+            
+            for method, deps in self.pipeline_dependencies.items():
+                if current_method in deps['depends_on']:
+                    downstream.append(method)
+                    find_dependents(method)
+        
+        find_dependents(method_name)
+        return sorted(set(downstream))
+    
+    def _invalidate_downstream_caches(self, method_name: str):
+        """Invalidate cache files for all methods downstream of the given method."""
+        downstream_methods = self._get_downstream_methods(method_name)
+        
+        if downstream_methods:
+            self.logger.info(f"Invalidating downstream caches for methods: {downstream_methods}")
+            
+            for method in downstream_methods:
+                # Mark method as incomplete
+                self.method_completion[method] = False
+                
+                # Remove cache files
+                cache_files = self.pipeline_dependencies.get(method, {}).get('cache_files', [])
+                for cache_file in cache_files:
+                    cache_path = os.path.join(self.experiment_directory, cache_file)
+                    if os.path.exists(cache_path):
+                        try:
+                            os.remove(cache_path)
+                            self.logger.debug(f"Removed cache file: {cache_file}")
+                        except OSError as e:
+                            self.logger.warning(f"Failed to remove cache file {cache_file}: {e}")
+    
+    def _validate_dependencies(self, method_name: str) -> List[str]:
+        """Check if all dependencies for a method are satisfied."""
+        missing = []
+        dependencies = self.pipeline_dependencies.get(method_name, {}).get('depends_on', [])
+        
+        for dep in dependencies:
+            if not self.method_completion.get(dep, False):
+                missing.append(dep)
+        
+        return missing
+    
+    def _mark_method_completed(self, method_name: str):
+        """Mark a method as successfully completed."""
+        self.method_completion[method_name] = True
+        self.logger.debug(f"Method '{method_name}' marked as completed")
 
     # ============================================================================
     # Data Getter/Setter Methods
@@ -1059,7 +1158,9 @@ class MstmlOrchestrator:
 
     def save_orchestrator_state(self, filename: Optional[str] = None):
         """
-        Save the entire orchestrator state to experiment directory for later restoration.
+        Save the essential orchestrator state to experiment directory for later restoration.
+        
+        Excludes non-pickleable objects like Cython-based dendrogram structures.
         
         Args:
             filename: Custom filename, auto-generated if None
@@ -1068,9 +1169,43 @@ class MstmlOrchestrator:
             timestamp = get_date_hour_minute()
             filename = f"mstml_orchestrator_state_{timestamp}.pkl"
         
+        # Create a state dictionary with only pickleable objects
+        state = {}
+        
+        # Basic configuration and metadata
+        state['dataset_name'] = self.dataset_name
+        state['experiment_directory'] = self.experiment_directory
+        state['config'] = self.config
+        state['method_completion'] = self.method_completion
+        state['pipeline_dependencies'] = self.pipeline_dependencies
+        
+        # Pickleable data structures
+        safe_attributes = [
+            'documents_df', 'vocabulary', 'bow_corpus', 'time_chunks',
+            'chunk_topic_models', 'chunk_topics', 'topic_vectors',
+            'expanded_doc_topic_distns', 'author_topic_barycenters',
+            'authId_to_docs', 'authId2docweights',
+            'author_ct_distns', 'doc_ct_distns', 'diffusion_matrix',
+            'coauthor_network', 'topic_dendrogram_linkage', 
+            'author_index_map', 'max_cut_distance', 'min_cut_distance'
+        ]
+        
+        for attr in safe_attributes:
+            if hasattr(self, attr):
+                try:
+                    value = getattr(self, attr)
+                    # Test picklability
+                    pickle.dumps(value)
+                    state[attr] = value
+                except Exception as e:
+                    self.logger.warning(f"Skipping non-pickleable attribute '{attr}': {e}")
+        
+        # Note: Exclude topic_dendrogram as it contains Cython objects
+        # It can be recreated from topic_dendrogram_linkage if needed
+        
         state_path = os.path.join(self.experiment_directory, filename)
-        write_pickle(state_path, self)
-        self.logger.info(f"Orchestrator state saved to {state_path}")
+        write_pickle(state_path, state)
+        self.logger.info(f"Orchestrator state saved to {state_path} (excluding non-pickleable objects)")
         return state_path
 
     @staticmethod
@@ -1084,8 +1219,33 @@ class MstmlOrchestrator:
         Returns:
             Restored MstmlOrchestrator instance
         """
-        orchestrator = read_pickle(state_path)
-        orchestrator.logger.info(f"Orchestrator state loaded from {state_path}")
+        state_data = read_pickle(state_path)
+        
+        # Handle both old format (direct orchestrator object) and new format (state dict)
+        if isinstance(state_data, MstmlOrchestrator):
+            # Old format - direct orchestrator object
+            orchestrator = state_data
+            orchestrator.logger.info(f"Orchestrator state loaded from {state_path} (legacy format)")
+        else:
+            # New format - state dictionary
+            # Create new orchestrator with basic parameters
+            orchestrator = MstmlOrchestrator(
+                dataset_name=state_data['dataset_name'],
+                experiment_directory=state_data['experiment_directory'],
+                config=state_data['config']
+            )
+            
+            # Restore dependency management state
+            orchestrator.method_completion = state_data.get('method_completion', {})
+            orchestrator.pipeline_dependencies = state_data.get('pipeline_dependencies', orchestrator.pipeline_dependencies)
+            
+            # Restore all saved attributes
+            for attr, value in state_data.items():
+                if attr not in ['dataset_name', 'experiment_directory', 'config', 'method_completion', 'pipeline_dependencies']:
+                    setattr(orchestrator, attr, value)
+            
+            orchestrator.logger.info(f"Orchestrator state loaded from {state_path} (new format)")
+        
         return orchestrator
 
     def _set_default_components(self):
@@ -1173,6 +1333,7 @@ class MstmlOrchestrator:
                     except Exception as e:
                         self.logger.warning(f"Failed to load cached data_loader: {e}")
                 
+                self._mark_method_completed('load_raw_data')
                 return self
         
         # Skip loading if already loaded (unless overwrite)
@@ -1340,6 +1501,10 @@ class MstmlOrchestrator:
         if overwrite is None:
             overwrite = getattr(self, '_default_overwrite', False)
         
+        # Dependency management: invalidate downstream caches if overwriting
+        if overwrite:
+            self._invalidate_downstream_caches('load_raw_data')
+        
         # Check for cached data with processing status
         main_df_cache_path = os.path.join(self.experiment_directory, "main_df.pkl")
         
@@ -1349,6 +1514,7 @@ class MstmlOrchestrator:
                 self.logger.info("Loading cached raw data from main_df.pkl")
                 self.documents_df = read_pickle(main_df_cache_path)
                 self.logger.info(f"Loaded {len(self.documents_df)} raw documents from cache")
+                self._mark_method_completed('load_raw_data')
                 return self
         
         # Skip loading if already loaded (unless overwrite)
@@ -1429,6 +1595,7 @@ class MstmlOrchestrator:
             self.logger.info("Cached data_loader")
         
         self._update_processing_status('load_data', True)
+        self._mark_method_completed('load_raw_data')
         
         return self
     
@@ -1467,6 +1634,14 @@ class MstmlOrchestrator:
             orchestrator.apply_data_filters(categories=['cs.AI', 'cs.LG'])
             print(f"After category filter: {len(orchestrator.documents_df)} documents")
         """
+        # Dependency management: validate dependencies and handle overwrite
+        missing_deps = self._validate_dependencies('apply_data_filters')
+        if missing_deps:
+            raise ValueError(f"apply_data_filters requires these methods first: {missing_deps}")
+        
+        if overwrite:
+            self._invalidate_downstream_caches('apply_data_filters')
+        
         # Check for cached data with processing status
         main_df_cache_path = os.path.join(self.experiment_directory, "main_df.pkl")
         
@@ -1476,6 +1651,7 @@ class MstmlOrchestrator:
                 self.logger.info("Loading cached filtered data from main_df.pkl")
                 self.documents_df = read_pickle(main_df_cache_path)
                 self.logger.info(f"Loaded {len(self.documents_df)} filtered documents from cache")
+                self._mark_method_completed('apply_data_filters')
                 return self
             elif status.get('load_data', False):
                 self.logger.info("Loading data from main_df.pkl to apply filters")
@@ -1562,6 +1738,7 @@ class MstmlOrchestrator:
         self.logger.info("Caching filtered data to main_df.pkl")
         write_pickle(main_df_cache_path, self.documents_df)
         self._update_processing_status('apply_data_filters', True)
+        self._mark_method_completed('apply_data_filters')
         
         return self
     
@@ -1647,6 +1824,14 @@ class MstmlOrchestrator:
             orchestrator.apply_data_filters(date_range={'start': '2020-01-01', 'end': '2023-12-31'})
             orchestrator.apply_author_disambiguation()
         """
+        # Dependency management: validate dependencies and handle overwrite
+        missing_deps = self._validate_dependencies('apply_author_disambiguation')
+        if missing_deps:
+            raise ValueError(f"apply_author_disambiguation requires these methods first: {missing_deps}")
+        
+        if overwrite:
+            self._invalidate_downstream_caches('apply_author_disambiguation')
+        
         # Check for cached data with processing status
         main_df_cache_path = os.path.join(self.experiment_directory, "main_df.pkl")
         
@@ -1656,6 +1841,7 @@ class MstmlOrchestrator:
                 self.logger.info("Loading cached disambiguated data from main_df.pkl")
                 self.documents_df = read_pickle(main_df_cache_path)
                 self.logger.info(f"Loaded {len(self.documents_df)} disambiguated documents from cache")
+                self._mark_method_completed('apply_author_disambiguation')
                 return self
             elif status.get('apply_data_filters', False) or status.get('load_data', False):
                 self.logger.info("Loading data from main_df.pkl to apply author disambiguation")
@@ -1697,6 +1883,7 @@ class MstmlOrchestrator:
         self.logger.info("Caching disambiguated data to main_df.pkl")
         write_pickle(main_df_cache_path, self.documents_df)
         self._update_processing_status('apply_author_disambiguation', True)
+        self._mark_method_completed('apply_author_disambiguation')
         
         return self
 
@@ -1749,6 +1936,14 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
+        # Dependency management: validate dependencies
+        missing_deps = self._validate_dependencies('setup_coauthor_network')
+        if missing_deps:
+            raise ValueError(f"setup_coauthor_network requires these methods first: {missing_deps}")
+        
+        if overwrite:
+            self._invalidate_downstream_caches('setup_coauthor_network')
+        
         if self.documents_df is None:
             raise ValueError("No documents loaded. Call load_data() first.")
         
@@ -1763,6 +1958,7 @@ class MstmlOrchestrator:
                 self.logger.info(f"Loading cached coauthor network from {network_cache_path}")
                 self.coauthor_network = nx.read_graphml(network_cache_path)
                 self.logger.info(f"Loaded coauthor network: {self.coauthor_network.number_of_nodes()} nodes, {self.coauthor_network.number_of_edges()} edges")
+                self._mark_method_completed('setup_coauthor_network')
                 return self
         
         # Get config defaults and apply parameter overrides
@@ -1774,9 +1970,8 @@ class MstmlOrchestrator:
         self.logger.info("Setting up co-author network using graph driver functions")
         
         if temporal and MainDataSchema.DATE.colname in self.documents_df.columns:
-            # Set up save directories and dataset name
-            dataset_name = getattr(data_loader, '_dataset_name', 'unknown')
-            networks_dir = data_loader.dataset_dirs["networks"]
+            # Use file management module for directory handling
+            networks_dir = get_data_networks_dir(dset=self.dataset_name, create=True)
             
             # Build temporal networks and compose them
             self.logger.info("Building temporal co-author networks")
@@ -1787,13 +1982,13 @@ class MstmlOrchestrator:
                 date_col=MainDataSchema.DATE.colname,
                 min_collaborations=min_collaborations,
                 save_dir=networks_dir,
-                dataset_name=dataset_name
+                dataset_name=self.dataset_name
             )
             
             # Create composed network filename
             if year_networks:
                 years = sorted(year_networks.keys())
-                composed_filename = f"composed_{dataset_name}_{years[0]}-{years[-1]}.graphml"
+                composed_filename = f"composed_{self.dataset_name}_{years[0]}-{years[-1]}.graphml"
                 composed_path = os.path.join(networks_dir, composed_filename)
             else:
                 composed_path = None
@@ -1865,6 +2060,8 @@ class MstmlOrchestrator:
             nx.write_graphml(self.coauthor_network, network_cache_path)
             self.logger.info(f"Cached coauthor network to {network_cache_path}")
         
+        self._mark_method_completed('setup_coauthor_network')
+        
         return self
     
     # ========================================================================================
@@ -1915,6 +2112,7 @@ class MstmlOrchestrator:
                 self.vocabulary = read_pickle(vocab_cache_path)
                 self.bow_corpus = read_pickle(bow_cache_path)
                 self.logger.info(f"Loaded preprocessed data: {len(self.documents_df)} documents, {len(self.vocabulary)} vocabulary terms")
+                self._mark_method_completed('preprocess_text')
                 return self
         
         # If no cached preprocessed data, try to load from main_df.pkl
@@ -2091,6 +2289,7 @@ class MstmlOrchestrator:
             self.logger.info("Loading cached temporal chunks from time_chunks.pkl")
             self.time_chunks = read_pickle(chunks_cache_path)
             self.logger.info(f"Loaded {len(self.time_chunks)} temporal chunks from cache")
+            self._mark_method_completed('create_temporal_chunks')
             return self
         
         if self.documents_df is None:
@@ -2385,6 +2584,13 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
+        # Dependency management: validate dependencies
+        missing_deps = self._validate_dependencies('train_chunk_models')
+        if missing_deps:
+            raise ValueError(f"train_chunk_models requires these methods first: {missing_deps}")
+        
+        if overwrite:
+            self._invalidate_downstream_caches('train_chunk_models')
         
         if not self.time_chunks:
             raise ValueError("No temporal chunks created. Call create_temporal_chunks() first.")
@@ -2404,6 +2610,7 @@ class MstmlOrchestrator:
             self.chunk_topic_models = read_pickle(models_cache_path)
             self.chunk_topics = read_pickle(topics_cache_path)
             self.topic_vectors = np.load(vectors_cache_path)
+            self._mark_method_completed('train_chunk_models')
             return self
         
         # Get config defaults and apply parameter overrides
@@ -2562,6 +2769,8 @@ class MstmlOrchestrator:
         write_pickle(topics_cache_path, self.chunk_topics)
         np.save(vectors_cache_path, self.topic_vectors)
         
+        self._mark_method_completed('train_chunk_models')
+        
         return self
     
     def build_author_document_distributions(self, overwrite: bool = False) -> 'MstmlOrchestrator':
@@ -2596,6 +2805,7 @@ class MstmlOrchestrator:
                 cached_metadata = read_pickle(additional_cache_path)
                 self.authId_to_docs = cached_metadata['authId_to_docs']
                 self.authId2docweights = cached_metadata['authId2docweights']
+            self._mark_method_completed('build_author_document_distributions')
             return self
         
         self.logger.info("Building author-document distribution pipeline")
@@ -2665,6 +2875,13 @@ class MstmlOrchestrator:
         Returns:
             Self for method chaining
         """
+        # Dependency management: validate dependencies and handle overwrite
+        missing_deps = self._validate_dependencies('apply_diffusion')
+        if missing_deps:
+            raise ValueError(f"apply_diffusion requires these methods first: {missing_deps}")
+        
+        if overwrite:
+            self._invalidate_downstream_caches('apply_diffusion')
         
         if not hasattr(self, 'expanded_doc_topic_distns') or not hasattr(self, 'author_topic_barycenters'):
             raise ValueError("No author-document distributions available. Call build_author_document_distributions() first.")
@@ -2683,6 +2900,7 @@ class MstmlOrchestrator:
             self.doc_ct_distns = read_pickle(doc_ct_cache_path)
             if os.path.exists(diffusion_matrix_cache_path):
                 self.diffusion_matrix = read_pickle(diffusion_matrix_cache_path)
+            self._mark_method_completed('apply_diffusion')
             return self
         
         # Create diffusion KNN graph and apply diffusion process
@@ -2693,6 +2911,7 @@ class MstmlOrchestrator:
         write_pickle(author_ct_cache_path, self.author_ct_distns)
         write_pickle(doc_ct_cache_path, self.doc_ct_distns)
         write_pickle(diffusion_matrix_cache_path, self.diffusion_matrix)
+        self._mark_method_completed('apply_diffusion')
         
         return self
     
@@ -2713,50 +2932,22 @@ class MstmlOrchestrator:
         if self.topic_vectors is None:
             raise ValueError("Topic vectors not available for KNN graph construction")
         
-        # Try FAISS first, fallback to scipy if not available
-        try:
-            if not FAISS_AVAILABLE:
-                raise ImportError("FAISS not available")
-                
-            self.logger.info("Using FAISS for diffusion KNN graph construction")
-            # Apply sqrt transformation for Hellinger distance in FAISS
-            sqrt_topic_vectors = np.sqrt(self.topic_vectors).astype(np.float32)
-            
-            # Build FAISS index for KNN search
-            dimension = sqrt_topic_vectors.shape[1]
-            index = faiss.IndexFlatL2(dimension)
-            index.add(sqrt_topic_vectors)
-            
-            # Perform KNN search with LARGE k (like reference code)
-            distances, indices = index.search(sqrt_topic_vectors, manifold_knnk + 1)  # +1 to include self
-            
-            # Normalize distances for Hellinger (divide by sqrt(2))
-            distances = distances / np.sqrt(2.0).astype(np.float32)
-            
-        except (ImportError, Exception) as e:
-            self.logger.warning(f"FAISS not available for diffusion KNN: {e}. Using scipy fallback")
-            # Fallback to scipy for small datasets
-            
-            # Apply sqrt transformation for Hellinger distance
-            sqrt_topic_vectors = np.sqrt(self.topic_vectors).astype(np.float32)
-            
-            # Compute pairwise Hellinger distances using scipy
-            hellinger_distances = pdist(sqrt_topic_vectors, metric='euclidean') / np.sqrt(2.0)
-            distance_matrix = squareform(hellinger_distances)
-            
-            # Get KNN indices for each topic
-            indices = []
-            distances = []
-            for i in range(len(sqrt_topic_vectors)):
-                row_distances = distance_matrix[i]
-                # Get indices of k+1 nearest neighbors (including self) using LARGE k
-                nearest_indices = np.argsort(row_distances)[:manifold_knnk + 1]
-                nearest_distances = row_distances[nearest_indices]
-                indices.append(nearest_indices)
-                distances.append(nearest_distances)
-            
-            indices = np.array(indices)
-            distances = np.array(distances)
+        # Use FAISS for KNN graph construction
+        self.logger.info("Using FAISS for diffusion KNN graph construction")
+        
+        # Apply sqrt transformation for Hellinger distance in FAISS
+        sqrt_topic_vectors = np.sqrt(self.topic_vectors).astype(np.float32)
+        
+        # Build FAISS index for KNN search
+        dimension = sqrt_topic_vectors.shape[1]
+        index = faiss.IndexFlatL2(dimension)
+        index.add(sqrt_topic_vectors)
+        
+        # Perform KNN search with LARGE k (like reference code)
+        distances, indices = index.search(sqrt_topic_vectors, manifold_knnk + 1)  # +1 to include self
+        
+        # Normalize distances for Hellinger (divide by sqrt(2))
+        distances = distances / np.sqrt(2.0).astype(np.float32)
         
         # Build sparse diffusion matrix for efficient matrix-based operations
         num_topics = len(self.topic_vectors)
@@ -2771,7 +2962,9 @@ class MstmlOrchestrator:
         
         # Process authors using matrix-based diffusion
         self.author_ct_distns = {}
-        for author_id, barycenter in self.author_topic_barycenters.items():
+        for i, (author_id, barycenter) in enumerate(self.author_topic_barycenters.items()):
+            # if type(author_id) is not int:
+            #     raise TypeError(f"Author id {author_id}, entry {i} in author_topic_barycenters is a {type(author_id)}")
             self.author_ct_distns[author_id] = diffuse_distribution_matrix(
                 self.diffusion_matrix, barycenter, num_iterations, diffusion_rate
             )
@@ -2787,257 +2980,44 @@ class MstmlOrchestrator:
     # 4. TOPIC MANIFOLD LEARNING AND DENDROGRAM CONSTRUCTION
     # ========================================================================================
     
-    def build_topic_manifold(self,
-                           distance_metric: Optional[str] = None,
-                           knn_neighbors: Optional[int] = None,
-                           use_faiss: Optional[bool] = None) -> 'MstmlOrchestrator':
-        """
-        Build topic manifold using information-geometric distances.
-        
-        Uses the large KNN parameter for manifold construction and hierarchical clustering.
-        
-        Args:
-            distance_metric: Distance metric ('hellinger', 'euclidean') (overrides config)
-            knn_neighbors: Number of nearest neighbors (overrides config)
-            use_faiss: Use FAISS for fast approximate nearest neighbors (overrides config)
-        
-        Returns:
-            Self for method chaining
-        """
-        
-        if self.topic_vectors is None:
-            raise ValueError("No topic vectors available. Call train_chunk_models() first.")
-        
-        # Get config defaults and apply parameter overrides
-        distance_config = self.config['distance_metric']
-        mesoscale_config = self.config['mesoscale_filtering']
-        distance_metric = distance_metric if distance_metric is not None else distance_config['type']
-        knn_neighbors = knn_neighbors if knn_neighbors is not None else mesoscale_config['knnk_for_tpc_dendro']
-        use_faiss = use_faiss if use_faiss is not None else mesoscale_config['faiss_acceleration']['enabled']
-        
-        self.logger.info(f"Building topic manifold with {distance_metric} distance and k={knn_neighbors}")
-        
-        n_topics = len(self.topic_vectors)
-        
-        # Use FAISS for large datasets if requested and available
-        faiss_utilized = False
-        min_vectors = mesoscale_config['faiss_acceleration']['min_vectors_for_faiss']
-        
-        if use_faiss and n_topics >= min_vectors:
-            self.logger.info(f"Attempting FAISS: use_faiss={use_faiss}, n_topics={n_topics}, min_vectors={min_vectors}")
-            try:
-                if not FAISS_AVAILABLE:
-                    raise ImportError("FAISS not available")
-                
-                self.logger.info(f"Using FAISS for {n_topics} topic vectors")
-                
-                if distance_metric.lower() == 'hellinger':
-                    # For Hellinger distance, we need to use square root transformation
-                    sqrt_vectors = np.sqrt(self.topic_vectors).astype(np.float32)
-                    dimension = sqrt_vectors.shape[1]
-                    
-                    # Create FAISS index
-                    index = faiss.IndexFlatL2(dimension)
-                    index.add(sqrt_vectors)
-                    
-                    # Search for k+1 nearest neighbors (including self)
-                    distances, indices = index.search(sqrt_vectors, knn_neighbors + 1)
-                    
-                    # Convert L2 distances to Hellinger distances
-                    distances = distances / np.sqrt(2.0)
-                    
-                elif distance_metric.lower() == 'euclidean':
-                    vectors = self.topic_vectors.astype(np.float32)
-                    dimension = vectors.shape[1]
-                    
-                    index = faiss.IndexFlatL2(dimension)
-                    index.add(vectors)
-                    
-                    distances, indices = index.search(vectors, knn_neighbors + 1)
-                    distances = np.sqrt(distances)  # FAISS returns squared distances
-                    
-                else:
-                    raise ValueError(f"FAISS acceleration not supported for {distance_metric} distance")
-                
-                # Build kNN graph from FAISS results
-                self.topic_knn_graph = nx.Graph()
-                self.topic_knn_graph.add_nodes_from(range(n_topics))
-                
-                for i in range(n_topics):
-                    for j in range(1, knn_neighbors + 1):  # Skip self (index 0)
-                        neighbor_idx = indices[i, j]
-                        distance = distances[i, j]
-                        self.topic_knn_graph.add_edge(i, neighbor_idx, weight=distance)
-                
-                faiss_utilized = True
-                
-            except (ImportError, Exception) as e:
-                self.logger.warning(f"FAISS failed ({str(e)}), falling back to scipy")
-                faiss_utilized = False
-        
-        if not faiss_utilized:
-            # Use scipy for smaller datasets or when FAISS is not available
-            self.logger.info(f"Using scipy for {n_topics} topic vectors (faiss_utilized={faiss_utilized})")
-            
-            # Compute pairwise distances
-            if distance_metric.lower() == 'hellinger':
-                distances = pdist(self.topic_vectors, metric=hellinger)
-            elif distance_metric.lower() == 'euclidean':
-                distances = pdist(self.topic_vectors, metric='euclidean')
-            elif distance_metric.lower() == 'cosine':
-                distances = pdist(self.topic_vectors, metric='cosine')
-            else:
-                raise ValueError(f"Unsupported distance metric: {distance_metric}")
-            
-            # Convert to square matrix
-            distance_matrix = squareform(distances)
-            
-            # Build kNN graph
-            self.topic_knn_graph = nx.Graph()
-            self.topic_knn_graph.add_nodes_from(range(n_topics))
-            
-            for i in range(n_topics):
-                # Get k nearest neighbors (excluding self)
-                neighbor_distances = [(j, distance_matrix[i, j]) for j in range(n_topics) if i != j]
-                neighbor_distances.sort(key=lambda x: x[1])
-                
-                # Add edges to k nearest neighbors
-                for j, dist in neighbor_distances[:knn_neighbors]:
-                    self.topic_knn_graph.add_edge(i, j, weight=dist)
-        
-        # Ensure graph was created successfully
-        if self.topic_knn_graph is None:
-            raise RuntimeError("Failed to create topic k-NN graph.")
-        
-        # Add metadata to nodes
-        for topic_idx, topic_info in enumerate(self.chunk_topics):
-            self.topic_knn_graph.nodes[topic_idx].update({
-                'chunk_id': topic_info['chunk_id'],
-                'topic_id': topic_info['topic_id'],
-                'chunk_size': topic_info['chunk_size']
-            })
-        
-        self.logger.info(
-            f"Topic manifold built: {self.topic_knn_graph.number_of_nodes()} nodes, "
-            f"{self.topic_knn_graph.number_of_edges()} edges (k={knn_neighbors})"
-        )
-        
-        return self
     
-    def construct_topic_dendrogram(self,
-                                 linkage_method: Optional[str] = None,
-                                 distance_metric: Optional[str] = None,
-                                 knn_neighbors: Optional[int] = None) -> 'MstmlOrchestrator':
+    def build_topic_manifold(self,
+                           linkage_method: Optional[str] = None,
+                           distance_metric: Optional[str] = None,
+                           knn_neighbors: Optional[int] = None) -> 'MstmlOrchestrator':
         """
-        Construct hierarchical topic dendrogram using agglomerative clustering.
+        Build topic manifold with dendrogram using FAISS k-NN approach (following reference code).
         
-        Based on the reference implementation with proper handling of Ward's linkage
-        with Hellinger distances using sqrt transformation to Euclidean space.
-        
-        Args:
-            linkage_method: Hierarchical clustering linkage ('ward', 'average', 'complete', 'single') (overrides config)
-            distance_metric: Distance metric ('hellinger', 'euclidean', 'cosine') (overrides config)
-            knn_neighbors: Number of nearest neighbors for sparse distance matrix (overrides config)
-        
-        Returns:
-            Self for method chaining
+        This method creates the dendrogram structure needed for topic clustering
+        without computing full O(n²) distance matrices.
         """
+        # Dependency management: validate dependencies 
+        missing_deps = self._validate_dependencies('build_topic_manifold')
+        if missing_deps:
+            raise ValueError(f"build_topic_manifold requires these methods first: {missing_deps}")
         
         if self.topic_vectors is None:
             raise ValueError("No topic vectors available. Call train_chunk_models() first.")
         
-        # Get config defaults and apply parameter overrides
+        # Get config defaults
         clustering_config = self.config['clustering']
-        distance_config = self.config['distance_metric']
+        distance_config = self.config['distance_metric'] 
         mesoscale_config = self.config['mesoscale_filtering']
-        linkage_method = linkage_method if linkage_method is not None else clustering_config['linkage_method']
-        distance_metric = distance_metric if distance_metric is not None else distance_config['type']
-        knn_neighbors = knn_neighbors if knn_neighbors is not None else mesoscale_config['knnk_for_tpc_dendro']
+        linkage_method = linkage_method or clustering_config['linkage_method']
+        distance_metric = distance_metric or distance_config['type']
+        knn_neighbors = knn_neighbors or mesoscale_config['knnk_for_tpc_dendro']
         
-        self.logger.info(f"Constructing topic dendrogram with {linkage_method} linkage and {distance_metric} distance")
+        self.logger.info(f"Building topic manifold: {len(self.topic_vectors)} topics, k={knn_neighbors}")
         
-        topic_matrix = np.array(self.topic_vectors).astype(np.float32)
-        n_topics = len(topic_matrix)
+        # Call the FAISS-based dendrogram construction
+        self._build_faiss_topic_dendrogram(linkage_method, distance_metric, knn_neighbors)
         
-        # Handle Ward's linkage with Hellinger distance
-        if linkage_method.lower() == 'ward' and distance_metric.lower() == 'hellinger':
-            self.logger.info("Using sqrt transformation for Ward's linkage with Hellinger distance")
-            
-            # Use k-NN graph approach
-            if n_topics >= 100 and hasattr(self, 'topic_knn_graph') and self.topic_knn_graph is not None:
-                # Extract distances from existing k-NN graph
-                pairs = []
-                for i, j, data in self.topic_knn_graph.edges(data=True):
-                    # Convert Hellinger to squared Euclidean for Ward's
-                    hellinger_dist = data['weight']
-                    euclidean_dist_sq = (hellinger_dist * np.sqrt(2)) ** 2
-                    pairs.append((i, j, euclidean_dist_sq))
-                
-                # Create sparse distance matrix
-                distance_matrix = np.full((n_topics, n_topics), 1.0, dtype=np.float32)
-                np.fill_diagonal(distance_matrix, 0)
-                
-                for i, j, dist in pairs:
-                    distance_matrix[i, j] = dist
-                    distance_matrix[j, i] = dist
-                
-                # Convert to condensed form and compute linkage
-                condensed_distances = squareform(distance_matrix)
-                self.topic_dendrogram_linkage = linkage(condensed_distances, method='ward')
-                
-            else:
-                # Direct computation for smaller datasets
-                sqrt_vectors = np.sqrt(topic_matrix)
-                euclidean_distances = pdist(sqrt_vectors, metric='euclidean')
-                # Square the distances for Ward's linkage
-                squared_distances = euclidean_distances ** 2
-                self.topic_dendrogram_linkage = linkage(squared_distances, method='ward')
-        
-        elif linkage_method.lower() != 'ward':
-            # For non-Ward linkage methods
-            if distance_metric.lower() == 'hellinger':
-                distances = pdist(topic_matrix, metric=hellinger)
-            elif distance_metric.lower() == 'euclidean':
-                distances = pdist(topic_matrix, metric='euclidean')
-            elif distance_metric.lower() == 'cosine':
-                distances = pdist(topic_matrix, metric='cosine')
-            else:
-                self.logger.warning(f"Unknown distance metric {distance_metric}, using euclidean")
-                distances = pdist(topic_matrix, metric='euclidean')
-            
-            self.topic_dendrogram_linkage = linkage(distances, method=linkage_method)
-        
-        else:
-            # Ward with non-Hellinger metrics
-            if distance_metric.lower() != 'euclidean':
-                self.logger.warning("Ward linkage works best with Euclidean distances")
-            
-            distances = pdist(topic_matrix, metric=distance_metric.lower())
-            self.topic_dendrogram_linkage = linkage(distances, method='ward')
-        
-        # Store original min/max heights for rescaling
-        self.min_cut_height = np.min(self.topic_dendrogram_linkage[:, 2])
-        self.max_cut_height = np.max(self.topic_dendrogram_linkage[:, 2])
-        
-        # Create enhanced dendrogram with link probabilities using fast_encode_tree_structure
+        # Create enhanced dendrogram with fast_encode_tree
         self._create_enhanced_dendrogram()
-        
-        # Store dendrogram metadata
-        self.dendrogram_info = {
-            'linkage_method': linkage_method,
-            'distance_metric': distance_metric,
-            'num_topics': n_topics,
-            'min_cut_height': self.min_cut_height,
-            'max_cut_height': self.max_cut_height,
-            'knn_neighbors': knn_neighbors
-        }
-        
-        self.logger.info(
-            f"Topic dendrogram constructed: {n_topics} leaves, "
-            f"cut height range [{self.min_cut_height:.3f}, {self.max_cut_height:.3f}]"
-        )
+        self._mark_method_completed('build_topic_manifold')
         
         return self
+
     
     def _create_enhanced_dendrogram(self):
         """Create enhanced dendrogram with link probabilities using fast_encode_tree_structure."""
@@ -3053,14 +3033,59 @@ class MstmlOrchestrator:
             self.topic_dendrogram = None
             return
         
+        # Check for cached enhanced dendrogram data
+        cache_path = os.path.join(self.experiment_directory, "enhanced_dendrogram.pkl")
+        if os.path.exists(cache_path):
+            try:
+                self.logger.info("Loading cached enhanced dendrogram data")
+                cached_data = read_pickle(cache_path)
+                
+                # Load basic data
+                self.topic_dendrogram_linkage = cached_data.get('topic_dendrogram_linkage', self.topic_dendrogram_linkage)
+                self.author_index_map = cached_data['author_index_map']
+                self.max_cut_distance = cached_data['max_cut_distance']
+                self.min_cut_distance = cached_data['min_cut_distance']
+                
+                # If cached data contains the old format (topic_dendrogram object), skip recreation
+                if 'topic_dendrogram' in cached_data:
+                    try:
+                        self.topic_dendrogram = cached_data['topic_dendrogram']
+                        self.logger.info("Loaded cached enhanced dendrogram (legacy format)")
+                        return
+                    except:
+                        # If loading the old format fails, fall through to recreation
+                        self.logger.info("Legacy dendrogram format failed, recreating...")
+                
+                # Recreate the enhanced dendrogram from cached linkage matrix
+                if self.topic_dendrogram_linkage is not None:
+                    self.logger.info("Recreating enhanced dendrogram from cached linkage matrix")
+                    # Continue to the creation logic below
+                else:
+                    self.logger.warning("No valid linkage matrix in cache")
+                    return
+                    
+            except Exception as e:
+                self.logger.warning(f"Failed to load cached dendrogram data: {e}")
+                # Continue to recreation
+        
         try:
             self.logger.info("Creating enhanced dendrogram with link probabilities")
+            
+            # Convert string nodes to int nodes in coauthor network (from reference code)
+            # This ensures compatibility with integer keys in author_ct_distns
+            network_for_tree = self.coauthor_network.copy()
+            try:
+                mapping = {node: int(node) for node in network_for_tree.nodes}
+                network_for_tree = nx.relabel_nodes(network_for_tree, mapping)
+                self.logger.debug("Converted coauthor network node labels from strings to integers")
+            except (ValueError, TypeError) as e:
+                self.logger.warning(f"Could not convert network node labels to integers: {e}")
             
             # Call fast_encode_tree_structure with the linkage matrix (Z), author distributions, and network
             encoded_root, author_index_map = fast_encode_tree_structure(
                 self.topic_dendrogram_linkage,
                 self.author_ct_distns,
-                self.coauthor_network
+                network_for_tree
             )
             
             # Store the enhanced dendrogram and mapping
@@ -3074,6 +3099,19 @@ class MstmlOrchestrator:
                 f"Dendrogram created with cut distance range "
                 f"[{self.min_cut_distance:.3f}, {self.max_cut_distance:.3f}]"
             )
+            
+            # Cache the essential dendrogram data (excluding non-pickleable Cython objects)
+            try:
+                cache_data = {
+                    'topic_dendrogram_linkage': self.topic_dendrogram_linkage,
+                    'author_index_map': self.author_index_map,
+                    'max_cut_distance': self.max_cut_distance,
+                    'min_cut_distance': self.min_cut_distance
+                }
+                write_pickle(cache_path, cache_data)
+                self.logger.info("Cached enhanced dendrogram data (linkage matrix and metadata)")
+            except Exception as e:
+                self.logger.warning(f"Failed to cache dendrogram data: {e}")
             
         except Exception as e:
             self.logger.warning(f"Failed to create dendrogram: {e}")
@@ -3095,7 +3133,7 @@ class MstmlOrchestrator:
         """
         
         if self.topic_dendrogram_linkage is None:
-            raise ValueError("No topic dendrogram available. Call construct_topic_dendrogram() first.")
+            raise ValueError("No topic dendrogram available. Call build_topic_manifold() first.")
         
         if self.coauthor_network is None:
             raise ValueError("No co-author network available. Call setup_coauthor_network() first.")
@@ -3115,11 +3153,17 @@ class MstmlOrchestrator:
         
         # Use fast tree encoding from the driver
         try:
-            encoded_root, _ = fast_encode_tree_structure(
-                self.topic_dendrogram_linkage, 
-                self.author_ct_distns or {},
-                self.coauthor_network
-            )
+            # Reuse already computed enhanced dendrogram if available
+            if hasattr(self, 'topic_dendrogram') and self.topic_dendrogram is not None:
+                self.logger.info("Reusing already computed enhanced dendrogram")
+                encoded_root = self.topic_dendrogram
+            else:
+                # Compute enhanced dendrogram if not available
+                encoded_root, _ = fast_encode_tree_structure(
+                    self.topic_dendrogram_linkage, 
+                    self.author_ct_distns or {},
+                    self.coauthor_network
+                )
             
             # Extract node probabilities from encoded tree
             self.internal_node_probabilities = self._extract_node_probabilities(encoded_root)
@@ -3413,125 +3457,58 @@ class MstmlOrchestrator:
                              dendrogram_knn_neighbors: int = 50,
                              **method_kwargs) -> 'MstmlOrchestrator':
         """
-        Create topic space embedding for visualization using various manifold learning methods.
-        
-        Based on reference implementation with proper Hellinger distance handling,
-        dendrogram integration, and support for 2D/3D embeddings.
-        
-        Args:
-            method: Embedding method ('phate', 'pca', 'umap', 'tsne')
-            n_components: Number of embedding dimensions (2 or 3)
-            knn_neighbors: Number of nearest neighbors for PHATE/UMAP
-            phate_gamma: PHATE gamma parameter for kernel bandwidth (0 = auto)
-            t: Number of diffusion steps for PHATE ('auto' or integer)
-            cut_height: Dendrogram cut height for meta-topic clustering (0-1 range)
-            distance_metric: Distance metric ('hellinger', 'euclidean', 'cosine')
-            linkage_method: Hierarchical clustering linkage method ('ward', 'average', 'complete', 'single')
-            dendrogram_knn_neighbors: Number of nearest neighbors for dendrogram construction
-            **method_kwargs: Additional parameters for specific embedding methods
-        
-        Returns:
-            Self for method chaining
+        Create topic embedding following reference implementation:
+        1. Build/use dendrogram (FAISS k-NN, fast)
+        2. Cut dendrogram to get clusters  
+        3. Compute full O(n²) distance matrix for PHATE (necessary)
         """
+        # Dependency management: validate dependencies
+        missing_deps = self._validate_dependencies('create_topic_embedding')
+        if missing_deps:
+            raise ValueError(f"create_topic_embedding requires these methods first: {missing_deps}")
         
         if self.topic_vectors is None:
             raise ValueError("No topic vectors available. Call train_chunk_models() first.")
         
-        # Validate linkage method
-        VALID_LINKAGE_METHODS = ['ward', 'single', 'complete', 'average', 'weighted', 'centroid', 'median']
-        if linkage_method not in VALID_LINKAGE_METHODS:
-            raise ValueError(f"linkage_method must be one of {VALID_LINKAGE_METHODS}")
-        
-        self.logger.info(f"Creating {n_components}D {method.upper()} embedding")
-        
-        # Ensure dendrogram exists with user-specified parameters
+        # Build dendrogram if needed
         if not hasattr(self, 'topic_dendrogram_linkage') or self.topic_dendrogram_linkage is None:
-            self.logger.info(f"Constructing topic dendrogram for embedding (linkage={linkage_method}, knn={dendrogram_knn_neighbors})")
-            self.construct_topic_dendrogram(
-                linkage_method=linkage_method,
-                distance_metric=distance_metric,
-                knn_neighbors=dendrogram_knn_neighbors
-            )
+            self.logger.info("Building topic manifold for embedding")
+            self.build_topic_manifold(linkage_method, distance_metric, dendrogram_knn_neighbors)
         
-        # Convert topic vectors to numpy array with proper dtype
         topic_matrix = np.array(self.topic_vectors, dtype=np.float32)
         n_topics = topic_matrix.shape[0]
         
-        # Validate parameters
-        if n_components <= 0:
-            raise ValueError("n_components must be positive")
-        if n_components >= n_topics:
-            log_print(
-                f"n_components ({n_components}) >= n_topics ({n_topics}). "
-                f"Reducing to {n_topics - 1} components.",
-                level="warning", logger=self.logger
-            )
-            n_components = n_topics - 1
-        if knn_neighbors >= n_topics:
-            log_print(
-                f"knn_neighbors ({knn_neighbors}) >= n_topics ({n_topics}). "
-                f"Reducing to {n_topics - 1} neighbors.",
-                level="warning", logger=self.logger
-            )
-            knn_neighbors = n_topics - 1
+        self.logger.info(f"Creating {n_components}D {method.upper()} embedding for {n_topics} topics")
         
-        # Apply dendrogram cut height if specified
+        # Cut dendrogram for clustering
         if cut_height is not None:
-            cut_result = self.cut_topic_dendrogram(
-                cut_height=cut_height,
-                min_cluster_size=1,  # Allow all clusters for embedding purposes
-                validate_height=True
-            )
+            self.cut_topic_dendrogram(cut_height=cut_height, min_cluster_size=1)
         
         # Compute embedding based on method
         method_lower = method.lower()
         
         if method_lower == 'phate' and PHATE_AVAILABLE:
-            # PHATE embedding with proper distance handling
+            # Reference implementation: compute full O(n²) Hellinger distance matrix for PHATE
             try:
-                if distance_metric.lower() == 'hellinger':
-                    # Compute Hellinger distance matrix using pdist for efficiency
-                    hellinger_distances = pdist(topic_matrix, metric=hellinger)
-                    distance_matrix = squareform(hellinger_distances)
-                    
-                    # Use knn_dist='precomputed' instead of metric='precomputed' (from reference)
-                    phate_op = phate.PHATE(
-                        n_components=n_components,
-                        knn=knn_neighbors,
-                        gamma=phate_gamma,
-                        t=t,
-                        knn_dist='precomputed',
-                        random_state=42,
-                        **method_kwargs
-                    )
-                    
-                    self.topic_embedding = phate_op.fit_transform(distance_matrix)
-                    
-                else:
-                    # For other distance metrics, use them directly if supported by PHATE
-                    metric_name = distance_metric.lower()
-                    if metric_name not in ['euclidean', 'cosine', 'l1', 'l2', 'manhattan']:
-                        # Fallback to euclidean for unsupported metrics
-                        log_print(
-                            f"Distance metric '{distance_metric}' not directly supported by PHATE, "
-                            f"falling back to euclidean distance", 
-                            level="warning", logger=self.logger
-                        )
-                        metric_name = 'euclidean'
-                    
-                    phate_op = phate.PHATE(
-                        n_components=n_components,
-                        knn=knn_neighbors,
-                        gamma=phate_gamma,
-                        t=t,
-                        metric=metric_name,
-                        random_state=42,
-                        **method_kwargs
-                    )
-                    
-                    self.topic_embedding = phate_op.fit_transform(topic_matrix)
+                self.logger.info("Computing pairwise Hellinger distances for PHATE embedding")
+                hellinger_distances = pdist(topic_matrix, metric=hellinger)
+                hellinger_distance_matrix = squareform(hellinger_distances)
                 
+                # PHATE with precomputed distances (reference approach)
+                phate_op = phate.PHATE(
+                    n_components=n_components,
+                    knn=knn_neighbors,
+                    gamma=phate_gamma,
+                    t=t,
+                    knn_dist='precomputed',
+                    **method_kwargs
+                )
+                
+                self.topic_embedding = phate_op.fit_transform(hellinger_distance_matrix)
+                self.topic_distance_matrix = hellinger_distance_matrix  # Store for later use
                 self.phate_operator = phate_op  # Store for t_value access
+                
+                self.logger.info(f"PHATE embedding completed (t={phate_op.t})")
                 
             except Exception as e:
                 log_print(
@@ -3547,18 +3524,18 @@ class MstmlOrchestrator:
                 # Validate distance metric for UMAP
                 metric_name = distance_metric.lower()
                 if metric_name == 'hellinger':
-                    # UMAP doesn't support Hellinger directly, use precomputed
-                    hellinger_distances = pdist(topic_matrix, metric=hellinger)
-                    distance_matrix = squareform(hellinger_distances)
+                    # Use sqrt transformation for Hellinger with UMAP to avoid O(n²) computation
+                    self.logger.info("Using sqrt transformation for Hellinger-UMAP embedding")
+                    sqrt_topic_matrix = np.sqrt(topic_matrix)
                     
                     umap_op = umap.UMAP(
                         n_components=n_components,
                         n_neighbors=knn_neighbors,
-                        metric='precomputed',
+                        metric='euclidean',  # Use euclidean on sqrt-transformed data
                         random_state=42,
                         **method_kwargs
                     )
-                    self.topic_embedding = umap_op.fit_transform(distance_matrix)
+                    self.topic_embedding = umap_op.fit_transform(sqrt_topic_matrix)
                 else:
                     # Validate supported metrics for UMAP
                     supported_metrics = ['euclidean', 'manhattan', 'chebyshev', 'minkowski', 'cosine', 'correlation']
@@ -3617,17 +3594,17 @@ class MstmlOrchestrator:
                 # For t-SNE, handle distance metrics carefully
                 metric_name = distance_metric.lower()
                 if metric_name == 'hellinger':
-                    # Use precomputed distance matrix for Hellinger
-                    hellinger_distances = pdist(topic_matrix, metric=hellinger)
-                    distance_matrix = squareform(hellinger_distances)
+                    # Use sqrt transformation for Hellinger with t-SNE to avoid O(n²) computation
+                    self.logger.info("Using sqrt transformation for Hellinger-tSNE embedding")
+                    sqrt_topic_matrix = np.sqrt(topic_matrix)
                     
                     tsne_op = TSNE(
                         n_components=n_components,
-                        metric='precomputed',
+                        metric='euclidean',  # Use euclidean on sqrt-transformed data
                         random_state=42,
                         **tsne_kwargs
                     )
-                    self.topic_embedding = tsne_op.fit_transform(distance_matrix)
+                    self.topic_embedding = tsne_op.fit_transform(sqrt_topic_matrix)
                 else:
                     # Validate supported metrics for t-SNE
                     supported_metrics = ['euclidean', 'l1', 'l2', 'manhattan', 'cosine']
@@ -3678,20 +3655,76 @@ class MstmlOrchestrator:
             f"{n_topics} topics -> {n_components}D space",
             level="info", logger=self.logger
         )
+        self._mark_method_completed('create_topic_embedding')
         
         return self
+
+    def _build_faiss_topic_dendrogram(self, linkage_method: str, distance_metric: str, knn_neighbors: int):
+        """Build topic dendrogram using FAISS k-NN to avoid O(n²) computation."""
+        if self.topic_vectors is None:
+            raise ValueError("No topic vectors available")
+            
+        topic_matrix = np.array(self.topic_vectors, dtype=np.float32)
+        n_topics = topic_matrix.shape[0]
+        
+        self.logger.info(f"Building dendrogram with FAISS k-NN (k={knn_neighbors}, linkage={linkage_method})")
+        
+        # Step 1: Use FAISS for k-NN search
+        if distance_metric.lower() == 'hellinger':
+            sqrt_topic_matrix = np.sqrt(topic_matrix)
+            search_matrix = sqrt_topic_matrix
+        else:
+            search_matrix = topic_matrix
+            
+        # Create FAISS index and search
+        dimension = search_matrix.shape[1]
+        index = faiss.IndexFlatL2(dimension)  
+        index.add(search_matrix.astype(np.float32))
+        distances, indices = index.search(search_matrix, knn_neighbors + 1)
+        
+        # Normalize distances for Hellinger
+        if distance_metric.lower() == 'hellinger':
+            distances = distances / np.sqrt(2).astype(np.float32)
+            
+        # Step 2: Build sparse distance matrix from k-NN pairs only
+        pairs = []
+        if linkage_method.lower() == 'ward' and distance_metric.lower() == 'hellinger':
+            # Special handling for Ward + Hellinger
+            adjusted_distances = distances * np.sqrt(2).astype(np.float32)
+            for i in range(n_topics):
+                for j in range(1, distances.shape[1]):  # Skip self (index 0)
+                    neighbor_idx = indices[i, j]
+                    if neighbor_idx != i:
+                        # Square distances for Ward's linkage
+                        dist_squared = adjusted_distances[i, j] ** 2
+                        pairs.append((i, neighbor_idx, np.float32(dist_squared)))
+        else:
+            # Non-Ward linkage
+            for i in range(n_topics):
+                for j in range(1, distances.shape[1]):  # Skip self
+                    neighbor_idx = indices[i, j]
+                    if neighbor_idx != i:
+                        pairs.append((i, neighbor_idx, np.float32(distances[i, j])))
+        
+        # Step 3: Create sparse distance matrix
+        high_value = np.float32(1.0)
+        distance_matrix = np.full((n_topics, n_topics), high_value, dtype=np.float32)
+        np.fill_diagonal(distance_matrix, 0)
+        
+        for i, j, dist in pairs:
+            distance_matrix[i, j] = dist
+            distance_matrix[j, i] = dist
+            
+        # Step 4: Perform hierarchical clustering
+        condensed_distances = squareform(distance_matrix)
+        self.topic_dendrogram_linkage = linkage(condensed_distances, method=linkage_method)
+        
+        # Store min/max heights
+        self.min_cut_height = np.min(self.topic_dendrogram_linkage[:, 2])
+        self.max_cut_height = np.max(self.topic_dendrogram_linkage[:, 2])
+        
+        self.logger.info(f"FAISS-based dendrogram completed: {n_topics} topics")
     
-    def create_phate_embedding(self, **kwargs) -> 'MstmlOrchestrator':
-        """
-        Backward compatibility method for create_phate_embedding.
-        Calls create_topic_embedding with method='phate'.
-        """
-        warnings.warn(
-            "create_phate_embedding is deprecated. Use create_topic_embedding(method='phate') instead.",
-            DeprecationWarning,
-            stacklevel=2
-        )
-        return self.create_topic_embedding(method='phate', **kwargs)
     
     def display_topic_embedding(self,
                               color_by: str = 'meta_topic',
@@ -4172,7 +4205,7 @@ class MstmlOrchestrator:
             Sets self.topic_cluster_labels with the cluster assignment array
         """
         if self.topic_dendrogram_linkage is None:
-            raise ValueError("Topic dendrogram not constructed. Call construct_topic_dendrogram() first.")
+            raise ValueError("Topic dendrogram not constructed. Call build_topic_manifold() first.")
         
         if min_cluster_size < 1:
             raise ValueError("min_cluster_size must be at least 1")
