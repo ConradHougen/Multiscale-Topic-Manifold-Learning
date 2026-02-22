@@ -560,72 +560,275 @@ class HellingerDistance(EmbeddingDistanceMetric):
         return "hellinger"
 
 
+class CosineDistance(EmbeddingDistanceMetric):
+    """Cosine distance metric for arbitrary vectors."""
+
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.params = kwargs
+
+    def compute_distance_matrix(self, vectors: np.ndarray) -> np.ndarray:
+        from scipy.spatial.distance import pdist, squareform
+        return squareform(pdist(vectors, metric='cosine'))
+
+    def compute_pairwise_distances(self, X: np.ndarray, Y: np.ndarray) -> np.ndarray:
+        from sklearn.metrics.pairwise import cosine_distances
+        return cosine_distances(X, Y)
+
+    def get_metric_name(self) -> str:
+        return "cosine"
+
+
+class EuclideanDistance(EmbeddingDistanceMetric):
+    """Euclidean (L2) distance metric."""
+
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.params = kwargs
+
+    def compute_distance_matrix(self, vectors: np.ndarray) -> np.ndarray:
+        from scipy.spatial.distance import pdist, squareform
+        return squareform(pdist(vectors, metric='euclidean'))
+
+    def compute_pairwise_distances(self, X: np.ndarray, Y: np.ndarray) -> np.ndarray:
+        from sklearn.metrics.pairwise import euclidean_distances
+        return euclidean_distances(X, Y)
+
+    def get_metric_name(self) -> str:
+        return "euclidean"
+
+
 class PHATEEmbedding(LowDimEmbedding):
     """
     PHATE embedding implementation.
-    
+
     Default dimensionality reduction method for MSTML topic visualization.
     """
-    
-    def __init__(self, n_components: int = 2, knn_neighbors: int = 10,
-                 gamma: float = 1.0, t = 'auto', **kwargs):
+
+    def __init__(self, n_components: int = 2, knn: int = 10,
+                 gamma: float = 1.0, t='auto', **kwargs):
         self.n_components = n_components
-        self.knn_neighbors = knn_neighbors
+        self.knn = knn
         self.gamma = gamma
         self.t = t
         self.kwargs = kwargs
         self.phate_model = None
+        self.distance_matrix = None  # Set when fit_transform is called with a distance_metric
         self.fitted = False
-    
-    def fit_transform(self, X: np.ndarray, 
+
+    def fit_transform(self, X: np.ndarray,
                      distance_metric: Optional[EmbeddingDistanceMetric] = None) -> np.ndarray:
         if not PHATE_AVAILABLE:
             raise ImportError("PHATE not installed. Install with: pip install phate")
-        
-        # Use custom distance metric if provided
+
         if distance_metric is not None:
-            # Compute distance matrix and use precomputed metric
-            distance_matrix = distance_metric.compute_distance_matrix(X)
+            # Compute full pairwise distance matrix and tell PHATE it is precomputed.
+            # phate.PHATE uses knn_dist='precomputed' (not metric='precomputed').
+            self.distance_matrix = distance_metric.compute_distance_matrix(X)
             self.phate_model = phate.PHATE(
                 n_components=self.n_components,
-                knn=self.knn_neighbors,
+                knn=self.knn,
                 gamma=self.gamma,
                 t=self.t,
-                metric='precomputed',
+                knn_dist='precomputed',
                 **self.kwargs
             )
-            embedding = self.phate_model.fit_transform(distance_matrix)
+            embedding = self.phate_model.fit_transform(self.distance_matrix)
         else:
-            # Use default euclidean metric
             self.phate_model = phate.PHATE(
                 n_components=self.n_components,
-                knn=self.knn_neighbors,
+                knn=self.knn,
                 gamma=self.gamma,
                 t=self.t,
                 **self.kwargs
             )
             embedding = self.phate_model.fit_transform(X)
-        
+
         self.fitted = True
         return embedding
-    
+
     def transform(self, X: np.ndarray) -> np.ndarray:
         if not self.fitted or self.phate_model is None:
             raise ValueError("Model not fitted. Call fit_transform() first.")
         return self.phate_model.transform(X)
-    
+
     def get_embedding_params(self) -> Dict[str, Any]:
         return {
             'method': 'PHATE',
             'n_components': self.n_components,
-            'knn_neighbors': self.knn_neighbors,
+            'knn': self.knn,
             'gamma': self.gamma,
             't': self.t,
             **self.kwargs
         }
-    
+
     def get_method_name(self) -> str:
         return "PHATE"
+
+
+class UMAPEmbedding(LowDimEmbedding):
+    """
+    UMAP embedding implementation.
+
+    For Hellinger distance, applies the sqrt-transformation trick so that
+    Euclidean distance on sqrt(X) equals Hellinger distance, avoiding an
+    O(n²) precomputed matrix.
+    """
+
+    def __init__(self, n_components: int = 2, n_neighbors: int = 15,
+                 random_state: int = 42, **kwargs):
+        self.n_components = n_components
+        self.n_neighbors = n_neighbors
+        self.random_state = random_state
+        self.kwargs = kwargs
+        self.umap_model = None
+        self.fitted = False
+
+    def fit_transform(self, X: np.ndarray,
+                     distance_metric: Optional[EmbeddingDistanceMetric] = None) -> np.ndarray:
+        try:
+            import umap as umap_lib
+        except ImportError:
+            raise ImportError("UMAP not installed. Install with: pip install umap-learn")
+
+        metric_name = distance_metric.get_metric_name() if distance_metric is not None else 'euclidean'
+
+        if metric_name == 'hellinger':
+            # sqrt-transformation trick: Euclidean(√p, √q) = Hellinger(p, q) (up to constant)
+            X_fit = np.sqrt(np.maximum(X / X.sum(axis=1, keepdims=True), 0))
+            metric = 'euclidean'
+        else:
+            X_fit = X
+            metric = metric_name
+
+        self.umap_model = umap_lib.UMAP(
+            n_components=self.n_components,
+            n_neighbors=self.n_neighbors,
+            metric=metric,
+            random_state=self.random_state,
+            **self.kwargs
+        )
+        embedding = self.umap_model.fit_transform(X_fit)
+        self.fitted = True
+        return embedding
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        if not self.fitted or self.umap_model is None:
+            raise ValueError("Model not fitted. Call fit_transform() first.")
+        return self.umap_model.transform(X)
+
+    def get_embedding_params(self) -> Dict[str, Any]:
+        return {
+            'method': 'UMAP',
+            'n_components': self.n_components,
+            'n_neighbors': self.n_neighbors,
+            'random_state': self.random_state,
+            **self.kwargs
+        }
+
+    def get_method_name(self) -> str:
+        return "UMAP"
+
+
+class TSNEEmbedding(LowDimEmbedding):
+    """
+    t-SNE embedding implementation.
+
+    For Hellinger distance, applies the sqrt-transformation trick (same as UMAP).
+    Perplexity is automatically clamped to a valid range for small datasets.
+    """
+
+    def __init__(self, n_components: int = 2, perplexity: float = 30.0,
+                 random_state: int = 42, **kwargs):
+        self.n_components = n_components
+        self.perplexity = perplexity
+        self.random_state = random_state
+        self.kwargs = kwargs
+        self.fitted = False
+        self._embedding = None
+
+    def fit_transform(self, X: np.ndarray,
+                     distance_metric: Optional[EmbeddingDistanceMetric] = None) -> np.ndarray:
+        from sklearn.manifold import TSNE
+
+        n_samples = X.shape[0]
+        # Clamp perplexity: must be < n_samples and at least 5
+        perplexity = min(self.perplexity, (n_samples - 1) / 3.0)
+        perplexity = max(perplexity, min(5.0, n_samples - 1))
+
+        metric_name = distance_metric.get_metric_name() if distance_metric is not None else 'euclidean'
+
+        if metric_name == 'hellinger':
+            X_fit = np.sqrt(np.maximum(X / X.sum(axis=1, keepdims=True), 0))
+            metric = 'euclidean'
+        else:
+            X_fit = X
+            metric = metric_name
+
+        tsne = TSNE(
+            n_components=self.n_components,
+            perplexity=perplexity,
+            metric=metric,
+            random_state=self.random_state,
+            **self.kwargs
+        )
+        self._embedding = tsne.fit_transform(X_fit)
+        self.fitted = True
+        return self._embedding
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        raise NotImplementedError("t-SNE does not support out-of-sample transform. Use fit_transform().")
+
+    def get_embedding_params(self) -> Dict[str, Any]:
+        return {
+            'method': 'TSNE',
+            'n_components': self.n_components,
+            'perplexity': self.perplexity,
+            'random_state': self.random_state,
+            **self.kwargs
+        }
+
+    def get_method_name(self) -> str:
+        return "TSNE"
+
+
+class PCAEmbedding(LowDimEmbedding):
+    """PCA dimensionality reduction. Used as a fast fallback when other methods fail."""
+
+    def __init__(self, n_components: int = 2, random_state: int = 42, **kwargs):
+        self.n_components = n_components
+        self.random_state = random_state
+        self.kwargs = kwargs
+        self.pca_model = None
+        self.fitted = False
+
+    def fit_transform(self, X: np.ndarray,
+                     distance_metric: Optional[EmbeddingDistanceMetric] = None) -> np.ndarray:
+        from sklearn.decomposition import PCA
+        self.pca_model = PCA(
+            n_components=self.n_components,
+            random_state=self.random_state,
+            **self.kwargs
+        )
+        embedding = self.pca_model.fit_transform(X)
+        self.fitted = True
+        return embedding
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        if not self.fitted or self.pca_model is None:
+            raise ValueError("Model not fitted. Call fit_transform() first.")
+        return self.pca_model.transform(X)
+
+    def get_embedding_params(self) -> Dict[str, Any]:
+        return {
+            'method': 'PCA',
+            'n_components': self.n_components,
+            'random_state': self.random_state,
+            **self.kwargs
+        }
+
+    def get_method_name(self) -> str:
+        return "PCA"
 
 
 """============================================================================
@@ -651,35 +854,53 @@ def create_topic_model(model_type: str = 'LDA', **kwargs) -> UnitTopicModel:
 def create_distance_metric(metric_type: str = 'hellinger', **kwargs) -> EmbeddingDistanceMetric:
     """
     Factory function to create distance metric instances.
-    
+
     Args:
-        metric_type: Type of distance metric ('hellinger', 'cosine', 'euclidean', etc.)
-        **kwargs: Metric-specific parameters
-    
+        metric_type: Type of distance metric. Supported: 'hellinger', 'cosine', 'euclidean'.
+        **kwargs: Metric-specific parameters passed to the concrete class.
+
     Returns:
         EmbeddingDistanceMetric instance
     """
-    if metric_type.lower() == 'hellinger':
+    metric_lower = metric_type.lower()
+    if metric_lower == 'hellinger':
         return HellingerDistance(**kwargs)
+    elif metric_lower == 'cosine':
+        return CosineDistance(**kwargs)
+    elif metric_lower in ('euclidean', 'l2'):
+        return EuclideanDistance(**kwargs)
     else:
-        raise ValueError(f"Unknown distance metric type: {metric_type}")
+        raise ValueError(
+            f"Unknown distance metric type: '{metric_type}'. "
+            f"Supported: hellinger, cosine, euclidean"
+        )
 
 
 def create_embedding_method(method_type: str = 'PHATE', **kwargs) -> LowDimEmbedding:
     """
     Factory function to create embedding method instances.
-    
+
     Args:
-        method_type: Type of embedding method ('PHATE', 'UMAP', 'TSNE', etc.)
-        **kwargs: Method-specific parameters
-    
+        method_type: Type of embedding method. Supported: 'PHATE', 'UMAP', 'TSNE', 'PCA'.
+        **kwargs: Method-specific parameters passed to the concrete class.
+
     Returns:
         LowDimEmbedding instance
     """
-    if method_type.upper() == 'PHATE':
+    method_upper = method_type.upper()
+    if method_upper == 'PHATE':
         return PHATEEmbedding(**kwargs)
+    elif method_upper == 'UMAP':
+        return UMAPEmbedding(**kwargs)
+    elif method_upper in ('TSNE', 'T-SNE'):
+        return TSNEEmbedding(**kwargs)
+    elif method_upper == 'PCA':
+        return PCAEmbedding(**kwargs)
     else:
-        raise ValueError(f"Unknown embedding method type: {method_type}")
+        raise ValueError(
+            f"Unknown embedding method type: '{method_type}'. "
+            f"Supported: PHATE, UMAP, TSNE, PCA"
+        )
 
 
 """============================================================================
@@ -1250,16 +1471,20 @@ class MstmlOrchestrator:
 
     def _set_default_components(self):
         """Initialize default components based on configuration."""
-        # Initialize default distance metric
+        # Initialize default distance metric.
+        # config layout: distance_metric.params.<type_name>: {key: val, ...}
         distance_type = self.config['distance_metric']['type']
-        distance_params = self.config['distance_metric'].get('params', {})
+        all_distance_params = self.config['distance_metric'].get('params', {})
+        distance_params = all_distance_params.get(distance_type.lower(), {})
         self.distance_metric = create_distance_metric(distance_type, **distance_params)
-        
-        # Initialize default embedding method
+
+        # Initialize default embedding method.
+        # config layout: topic_embedding.params.<type_name_lower>: {key: val, ...}
         embedding_type = self.config['topic_embedding']['type']
-        embedding_params = self.config['topic_embedding'].get('params', {})
+        all_embedding_params = self.config['topic_embedding'].get('params', {})
+        embedding_params = all_embedding_params.get(embedding_type.lower(), {})
         self.embedding_method = create_embedding_method(embedding_type, **embedding_params)
-        
+
         self.logger.info(f"Default components initialized: {distance_type} distance, {embedding_type} embedding")
 
 
@@ -2862,9 +3087,10 @@ class MstmlOrchestrator:
             f"{len(self.expanded_doc_topic_distns)} documents, "
             f"{len(self.author_topic_barycenters)} authors"
         )
-        
+        self._mark_method_completed('build_author_document_distributions')
+
         return self
-    
+
     def apply_diffusion(self, overwrite: bool = False) -> 'MstmlOrchestrator':
         """
         Apply diffusion process to author and document distributions.
@@ -2945,9 +3171,10 @@ class MstmlOrchestrator:
         
         # Perform KNN search with LARGE k (like reference code)
         distances, indices = index.search(sqrt_topic_vectors, manifold_knnk + 1)  # +1 to include self
-        
-        # Normalize distances for Hellinger (divide by sqrt(2))
-        distances = distances / np.sqrt(2.0).astype(np.float32)
+
+        # Convert FAISS squared L2 distances to Hellinger distances.
+        # IndexFlatL2 on sqrt(X) gives ||√p − √q||² = 2·H(p,q)², so H = sqrt(faiss_dist / 2).
+        distances = np.sqrt(distances / 2.0).astype(np.float32)
         
         # Build sparse diffusion matrix for efficient matrix-based operations
         num_topics = len(self.topic_vectors)
@@ -3457,187 +3684,89 @@ class MstmlOrchestrator:
                              dendrogram_knn_neighbors: int = 50,
                              **method_kwargs) -> 'MstmlOrchestrator':
         """
-        Create topic embedding following reference implementation:
-        1. Build/use dendrogram (FAISS k-NN, fast)
-        2. Cut dendrogram to get clusters  
-        3. Compute full O(n²) distance matrix for PHATE (necessary)
+        Create topic embedding.
+
+        Steps:
+        1. Build the topic dendrogram (FAISS k-NN) if not already done.
+        2. Cut the dendrogram to obtain meta-topic clusters.
+        3. Run the requested embedding method on the topic-vector matrix.
+
+        The embedding is delegated to the concrete LowDimEmbedding class so
+        that switching from PHATE → UMAP → t-SNE → PCA only requires changing
+        the ``method`` argument (or ``topic_embedding.type`` in config.yaml).
+        A PCA fallback is applied automatically when the requested method fails.
         """
-        # Dependency management: validate dependencies
         missing_deps = self._validate_dependencies('create_topic_embedding')
         if missing_deps:
             raise ValueError(f"create_topic_embedding requires these methods first: {missing_deps}")
-        
+
         if self.topic_vectors is None:
             raise ValueError("No topic vectors available. Call train_chunk_models() first.")
-        
+
         # Build dendrogram if needed
         if not hasattr(self, 'topic_dendrogram_linkage') or self.topic_dendrogram_linkage is None:
             self.logger.info("Building topic manifold for embedding")
             self.build_topic_manifold(linkage_method, distance_metric, dendrogram_knn_neighbors)
-        
+
         topic_matrix = np.array(self.topic_vectors, dtype=np.float32)
         n_topics = topic_matrix.shape[0]
-        
+
         self.logger.info(f"Creating {n_components}D {method.upper()} embedding for {n_topics} topics")
-        
-        # Cut dendrogram for clustering
+
         if cut_height is not None:
             self.cut_topic_dendrogram(cut_height=cut_height, min_cluster_size=1)
-        
-        # Compute embedding based on method
+
+        # ── Build embedding object from call params ───────────────────────────
         method_lower = method.lower()
-        
-        if method_lower == 'phate' and PHATE_AVAILABLE:
-            # Reference implementation: compute full O(n²) Hellinger distance matrix for PHATE
-            try:
-                self.logger.info("Computing pairwise Hellinger distances for PHATE embedding")
-                hellinger_distances = pdist(topic_matrix, metric=hellinger)
-                hellinger_distance_matrix = squareform(hellinger_distances)
-                
-                # PHATE with precomputed distances (reference approach)
-                phate_op = phate.PHATE(
-                    n_components=n_components,
-                    knn=knn_neighbors,
-                    gamma=phate_gamma,
-                    t=t,
-                    knn_dist='precomputed',
-                    **method_kwargs
-                )
-                
-                self.topic_embedding = phate_op.fit_transform(hellinger_distance_matrix)
-                self.topic_distance_matrix = hellinger_distance_matrix  # Store for later use
-                self.phate_operator = phate_op  # Store for t_value access
-                
-                self.logger.info(f"PHATE embedding completed (t={phate_op.t})")
-                
-            except Exception as e:
-                log_print(
-                    f"PHATE embedding failed: {e}. Falling back to PCA.",
-                    level="warning", logger=self.logger
-                )
-                method_lower = 'pca'  # Fallback to PCA
-            
+        metric_obj = create_distance_metric(distance_metric)
+
+        if method_lower == 'phate':
+            embedding_obj = PHATEEmbedding(
+                n_components=n_components,
+                knn=knn_neighbors,
+                gamma=phate_gamma,
+                t=t,
+                **method_kwargs
+            )
         elif method_lower == 'umap':
-            # UMAP embedding
-            try:
-                
-                # Validate distance metric for UMAP
-                metric_name = distance_metric.lower()
-                if metric_name == 'hellinger':
-                    # Use sqrt transformation for Hellinger with UMAP to avoid O(n²) computation
-                    self.logger.info("Using sqrt transformation for Hellinger-UMAP embedding")
-                    sqrt_topic_matrix = np.sqrt(topic_matrix)
-                    
-                    umap_op = umap.UMAP(
-                        n_components=n_components,
-                        n_neighbors=knn_neighbors,
-                        metric='euclidean',  # Use euclidean on sqrt-transformed data
-                        random_state=42,
-                        **method_kwargs
-                    )
-                    self.topic_embedding = umap_op.fit_transform(sqrt_topic_matrix)
-                else:
-                    # Validate supported metrics for UMAP
-                    supported_metrics = ['euclidean', 'manhattan', 'chebyshev', 'minkowski', 'cosine', 'correlation']
-                    if metric_name not in supported_metrics:
-                        log_print(
-                            f"Distance metric '{distance_metric}' not supported by UMAP, "
-                            f"falling back to euclidean distance", 
-                            level="warning", logger=self.logger
-                        )
-                        metric_name = 'euclidean'
-                    
-                    umap_op = umap.UMAP(
-                        n_components=n_components,
-                        n_neighbors=knn_neighbors,
-                        metric=metric_name,
-                        random_state=42,
-                        **method_kwargs
-                    )
-                    self.topic_embedding = umap_op.fit_transform(topic_matrix)
-                    
-                method_lower = 'umap'
-                
-            except ImportError:
-                log_print("UMAP not available, falling back to PCA", level="warning", logger=self.logger)
-                method_lower = 'pca'
-            except Exception as e:
-                log_print(f"UMAP embedding failed: {e}. Falling back to PCA.", level="warning", logger=self.logger)
-                method_lower = 'pca'
-                
+            embedding_obj = UMAPEmbedding(
+                n_components=n_components,
+                n_neighbors=knn_neighbors,
+                **method_kwargs
+            )
         elif method_lower == 'tsne':
-            # t-SNE embedding
-            try:
-                # Validate parameters for t-SNE
-                if n_components > 3:
-                    log_print(
-                        f"t-SNE with {n_components} components may not be effective. "
-                        f"Consider using n_components <= 3 for t-SNE.",
-                        level="warning", logger=self.logger
-                    )
-                
-                # Adjust perplexity for small datasets
-                tsne_kwargs = method_kwargs.copy()
-                if 'perplexity' not in tsne_kwargs:
-                    # Default perplexity should be smaller than n_samples
-                    default_perplexity = min(30, (n_topics - 1) / 3)
-                    if default_perplexity < 5:
-                        default_perplexity = min(5, n_topics - 1)
-                    tsne_kwargs['perplexity'] = default_perplexity
-                    
-                    if tsne_kwargs['perplexity'] != 30:
-                        log_print(
-                            f"Adjusted t-SNE perplexity to {tsne_kwargs['perplexity']} for dataset with {n_topics} topics",
-                            level="info", logger=self.logger
-                        )
-                
-                # For t-SNE, handle distance metrics carefully
-                metric_name = distance_metric.lower()
-                if metric_name == 'hellinger':
-                    # Use sqrt transformation for Hellinger with t-SNE to avoid O(n²) computation
-                    self.logger.info("Using sqrt transformation for Hellinger-tSNE embedding")
-                    sqrt_topic_matrix = np.sqrt(topic_matrix)
-                    
-                    tsne_op = TSNE(
-                        n_components=n_components,
-                        metric='euclidean',  # Use euclidean on sqrt-transformed data
-                        random_state=42,
-                        **tsne_kwargs
-                    )
-                    self.topic_embedding = tsne_op.fit_transform(sqrt_topic_matrix)
-                else:
-                    # Validate supported metrics for t-SNE
-                    supported_metrics = ['euclidean', 'l1', 'l2', 'manhattan', 'cosine']
-                    if metric_name not in supported_metrics:
-                        log_print(
-                            f"Distance metric '{distance_metric}' not supported by t-SNE, "
-                            f"falling back to euclidean distance", 
-                            level="warning", logger=self.logger
-                        )
-                        metric_name = 'euclidean'
-                    
-                    tsne_op = TSNE(
-                        n_components=n_components,
-                        metric=metric_name,
-                        random_state=42,
-                        **tsne_kwargs
-                    )
-                    self.topic_embedding = tsne_op.fit_transform(topic_matrix)
-                    
-                method_lower = 'tsne'
-                
-            except Exception as e:
-                log_print(f"t-SNE embedding failed: {e}. Falling back to PCA.", level="warning", logger=self.logger)
-                method_lower = 'pca'
-        
-        # Fallback to PCA (or explicit PCA request)
-        if method_lower == 'pca' or not hasattr(self, 'topic_embedding'):
-            pca = PCA(n_components=n_components, random_state=42, **method_kwargs)
-            self.topic_embedding = pca.fit_transform(topic_matrix)
-            log_print(f"PCA explained variance ratio: {pca.explained_variance_ratio_}", level="info", logger=self.logger)
+            embedding_obj = TSNEEmbedding(
+                n_components=n_components,
+                **method_kwargs
+            )
+        else:
+            embedding_obj = PCAEmbedding(n_components=n_components, **method_kwargs)
             method_lower = 'pca'
-        
-        # Store embedding parameters
+
+        # ── Fit, with PCA fallback ────────────────────────────────────────────
+        try:
+            self.topic_embedding = embedding_obj.fit_transform(
+                topic_matrix, distance_metric=metric_obj
+            )
+            method_lower = embedding_obj.get_method_name().lower()
+        except (ImportError, Exception) as e:
+            log_print(
+                f"{method.upper()} embedding failed: {e}. Falling back to PCA.",
+                level="warning", logger=self.logger
+            )
+            embedding_obj = PCAEmbedding(n_components=n_components)
+            self.topic_embedding = embedding_obj.fit_transform(topic_matrix)
+            method_lower = 'pca'
+
+        # ── Store embedding object and extra references ───────────────────────
+        self.embedding_method = embedding_obj
+
+        if method_lower == 'phate' and isinstance(embedding_obj, PHATEEmbedding):
+            self.phate_operator = embedding_obj.phate_model
+            if embedding_obj.distance_matrix is not None:
+                self.topic_distance_matrix = embedding_obj.distance_matrix
+
+        # ── Store embedding parameters ────────────────────────────────────────
         self.embed_params = {
             'method': method_lower.upper(),
             'n_components': n_components,
@@ -3649,14 +3778,13 @@ class MstmlOrchestrator:
             'method_kwargs': method_kwargs,
             'n_topics': n_topics
         }
-        
+
         log_print(
             f"Created {method_lower.upper()} embedding: "
             f"{n_topics} topics -> {n_components}D space",
             level="info", logger=self.logger
         )
         self._mark_method_completed('create_topic_embedding')
-        
         return self
 
     def _build_faiss_topic_dendrogram(self, linkage_method: str, distance_metric: str, knn_neighbors: int):
@@ -3682,38 +3810,27 @@ class MstmlOrchestrator:
         index.add(search_matrix.astype(np.float32))
         distances, indices = index.search(search_matrix, knn_neighbors + 1)
         
-        # Normalize distances for Hellinger
+        # Convert FAISS squared L2 distances to actual metric distances.
+        # IndexFlatL2 on sqrt(X) gives ||√p − √q||² = 2·H(p,q)², so H = sqrt(faiss_dist / 2).
         if distance_metric.lower() == 'hellinger':
-            distances = distances / np.sqrt(2).astype(np.float32)
-            
-        # Step 2: Build sparse distance matrix from k-NN pairs only
-        pairs = []
-        if linkage_method.lower() == 'ward' and distance_metric.lower() == 'hellinger':
-            # Special handling for Ward + Hellinger
-            adjusted_distances = distances * np.sqrt(2).astype(np.float32)
-            for i in range(n_topics):
-                for j in range(1, distances.shape[1]):  # Skip self (index 0)
-                    neighbor_idx = indices[i, j]
-                    if neighbor_idx != i:
-                        # Square distances for Ward's linkage
-                        dist_squared = adjusted_distances[i, j] ** 2
-                        pairs.append((i, neighbor_idx, np.float32(dist_squared)))
-        else:
-            # Non-Ward linkage
-            for i in range(n_topics):
-                for j in range(1, distances.shape[1]):  # Skip self
-                    neighbor_idx = indices[i, j]
-                    if neighbor_idx != i:
-                        pairs.append((i, neighbor_idx, np.float32(distances[i, j])))
-        
-        # Step 3: Create sparse distance matrix
+            distances = np.sqrt(distances / 2.0).astype(np.float32)
+
+        # Step 2: Build symmetric distance matrix from k-NN pairs.
+        # Non-neighbor pairs are initialised to 1.0 (max Hellinger distance).
+        # scipy's linkage() receives raw distances for all methods, including Ward.
         high_value = np.float32(1.0)
         distance_matrix = np.full((n_topics, n_topics), high_value, dtype=np.float32)
         np.fill_diagonal(distance_matrix, 0)
-        
-        for i, j, dist in pairs:
-            distance_matrix[i, j] = dist
-            distance_matrix[j, i] = dist
+
+        for i in range(n_topics):
+            for j in range(1, distances.shape[1]):  # Skip self (index 0)
+                neighbor_idx = indices[i, j]
+                if neighbor_idx != i:
+                    d = distances[i, j]
+                    # Keep the smaller of the two directed k-NN distances for symmetry.
+                    if d < distance_matrix[i, neighbor_idx]:
+                        distance_matrix[i, neighbor_idx] = d
+                        distance_matrix[neighbor_idx, i] = d
             
         # Step 4: Perform hierarchical clustering
         condensed_distances = squareform(distance_matrix)

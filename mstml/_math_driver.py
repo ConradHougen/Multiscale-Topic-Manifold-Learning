@@ -224,27 +224,33 @@ def entropy_of_max_weighted_mean(vecs: list[np.ndarray]):
 # ============================================================================
 
 def build_diffusion_matrix(indices, distances, num_topics, diffusion_knnk):
-    """Build sparse diffusion matrix from KNN search results"""
-    
+    """Build sparse diffusion matrix from KNN search results.
+
+    Weight formula: w_ij = 1 - d_ij / sum(d_i*)
+    This is the original AToMS-LP design (atoms_hrg_library.py).  Closer neighbours
+    receive higher weights.  Edge case: if a node has exactly one neighbour the
+    formula yields weight 0; in practice knnk >= 5 so this is never triggered.
+    """
+
     row_indices = []
-    col_indices = []  
+    col_indices = []
     weights = []
-    
+
     for i in range(num_topics):
         # Get neighbors (skip first index which is self)
         max_neighbors = min(diffusion_knnk, indices.shape[1] - 1)
         neighbors = indices[i, 1:max_neighbors+1]
         dists = distances[i, 1:max_neighbors+1]
-        
-        if len(dists) > 0 and dists.sum() > 0:
-            # Convert distances to similarity weights
+
+        if len(dists) > 1 and dists.sum() > 0:
+            # Convert distances to similarity weights (AToMS-LP formula).
             norm_weights = 1 - (dists / dists.sum())
-            
+
             for neighbor, weight in zip(neighbors, norm_weights):
                 row_indices.append(i)
                 col_indices.append(neighbor)
                 weights.append(weight)
-    
+
     return csr_matrix((weights, (row_indices, col_indices)), shape=(num_topics, num_topics))
 
 
@@ -271,7 +277,11 @@ def diffuse_distribution_matrix(diffusion_matrix, known_dist, num_iterations=1, 
 
 
 def diffuse_distribution(graph, known_dist, num_iterations=1, diffusion_rate=0.7):
-    """Function to perform diffusion for the author topic distributions over the chunk topic kNN graph"""
+    """Function to perform diffusion for the author topic distributions over the chunk topic kNN graph.
+
+    Weight formula: 1 - w/sum(w) mirrors the original AToMS-LP implementation
+    (atoms_hrg_library.py).  Only applies when a node has > 1 neighbour.
+    """
     num_topics = len(known_dist)
     distribution = np.copy(known_dist).astype(np.float32)
     buffer = np.zeros(num_topics, dtype=np.float32)
@@ -284,11 +294,15 @@ def diffuse_distribution(graph, known_dist, num_iterations=1, diffusion_rate=0.7
                 buffer[node] += distribution[node]
             else:
                 neighbors = list(graph.neighbors(node))
-                if neighbors:
+                if len(neighbors) > 1:
                     weights = np.array([graph[node][neighbor]['weight'] for neighbor in neighbors], dtype=np.float32)
                     norm_weights = 1 - (weights / weights.sum())
                     neighbors_dist = np.array([distribution[neighbor] for neighbor in neighbors], dtype=np.float32)
                     buffer[node] += diffusion_rate * np.dot(norm_weights, neighbors_dist)
+                elif len(neighbors) == 1:
+                    # Single neighbor: weight formula degenerates to 0; use the neighbor directly.
+                    neighbor = neighbors[0]
+                    buffer[node] += diffusion_rate * distribution[neighbor]
 
         distribution[:] = buffer
 
@@ -298,14 +312,21 @@ def diffuse_distribution(graph, known_dist, num_iterations=1, diffusion_rate=0.7
 
 
 def precompute_weights(graph, num_topics):
-    """Function to precompute weights for each node in the graph"""
+    """Function to precompute weights for each node in the graph.
+
+    Weight formula: 1 - w/sum(w) mirrors the original AToMS-LP implementation.
+    Handles single-neighbor edge case explicitly.
+    """
     weights_dict = {}
     for node in range(num_topics):
         neighbors = list(graph.neighbors(node))
-        if neighbors:
+        if len(neighbors) > 1:
             weights = np.array([graph[node][neighbor]['weight'] for neighbor in neighbors])
             weights = 1 - (weights / np.sum(weights))  # Convert distances to similarity weights
             weights_dict[node] = (neighbors, weights)
+        elif len(neighbors) == 1:
+            # Single neighbor: formula degenerates; assign weight 1.0 directly.
+            weights_dict[node] = (neighbors, np.array([1.0]))
         else:
             weights_dict[node] = ([], np.array([]))
     return weights_dict
