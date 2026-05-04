@@ -77,6 +77,25 @@ def hellinger_matrix(X: ndarray) -> ndarray:
     return cdist(sqrt_X, sqrt_X, metric="euclidean") / np.sqrt(2)
 
 
+def hellinger_matrix_cross(X: ndarray, Y: ndarray) -> ndarray:
+    """Vectorised cross-pairwise Hellinger distances between two sets of distributions.
+
+    Args:
+        X: (n, d) matrix of probability distributions (L1-normalised internally).
+        Y: (m, d) matrix of probability distributions (L1-normalised internally).
+
+    Returns:
+        (n, m) distance matrix where entry [i, j] = H(X[i], Y[j]).
+    """
+    X = np.asarray(X, dtype=np.float64)
+    Y = np.asarray(Y, dtype=np.float64)
+    rx = X.sum(axis=1, keepdims=True)
+    ry = Y.sum(axis=1, keepdims=True)
+    X = X / np.where(rx > 0, rx, 1.0)
+    Y = Y / np.where(ry > 0, ry, 1.0)
+    return cdist(np.sqrt(X), np.sqrt(Y), metric="euclidean") / np.sqrt(2)
+
+
 # ---------------------------------------------------------------------------
 # FAISS distance conversion (the fixed formula)
 # ---------------------------------------------------------------------------
@@ -101,7 +120,30 @@ def faiss_sq_l2_to_hellinger(sq_l2: ndarray) -> ndarray:
     return np.sqrt(np.asarray(sq_l2, dtype=np.float64) / 2.0)
 
 
-def faiss_sq_l2_to_distance(sq_l2: ndarray, distance_metric: str) -> ndarray:
+def faiss_sq_l2_to_hellinger_legacy(sq_l2: ndarray) -> ndarray:
+    """AToMS-LP original (buggy) FAISS conversion for exact historical reproducibility.
+
+    The original AToMS-LP notebooks treated IndexFlatL2 output as an un-squared L2
+    distance and divided by sqrt(2).  Because IndexFlatL2 actually returns SQUARED L2,
+    this yields sqrt(2)·H²(p,q) instead of H(p,q).
+
+    Use ONLY when --reproduce_legacy_bug is set, to bitwise-reproduce thesis/CAMSAP
+    2025 results.  For all new work use faiss_sq_l2_to_hellinger instead.
+
+    Args:
+        sq_l2: Array of FAISS squared-L2 distances (any shape).
+
+    Returns:
+        sqrt(2)·H²  — NOT a true Hellinger distance.
+    """
+    return np.asarray(sq_l2, dtype=np.float64) / np.sqrt(2)
+
+
+def faiss_sq_l2_to_distance(
+    sq_l2: ndarray,
+    distance_metric: str,
+    legacy_bug: bool = False,
+) -> ndarray:
     """Convert FAISS squared-L2 distances to the requested distance metric.
 
     For Hellinger: uses the FAISS sqrt-trick conversion.
@@ -113,6 +155,9 @@ def faiss_sq_l2_to_distance(sq_l2: ndarray, distance_metric: str) -> ndarray:
     Args:
         sq_l2: FAISS squared-L2 distances.
         distance_metric: 'hellinger', 'euclidean', or 'cosine'.
+        legacy_bug: If True and metric is 'hellinger', use the original AToMS-LP
+                    formula (sq_l2 / sqrt(2)) instead of the correct sqrt(sq_l2 / 2).
+                    Only set this for exact historical reproduction.
 
     Returns:
         Converted distances.
@@ -120,7 +165,8 @@ def faiss_sq_l2_to_distance(sq_l2: ndarray, distance_metric: str) -> ndarray:
     m = distance_metric.lower()
     sq_l2 = np.asarray(sq_l2, dtype=np.float64)
     if m == "hellinger":
-        return faiss_sq_l2_to_hellinger(sq_l2)
+        return faiss_sq_l2_to_hellinger_legacy(sq_l2) if legacy_bug \
+               else faiss_sq_l2_to_hellinger(sq_l2)
     elif m == "euclidean":
         return np.sqrt(sq_l2)
     elif m == "cosine":

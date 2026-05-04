@@ -196,6 +196,7 @@ def build_diffusion_graph(
     topic_vectors: np.ndarray,
     knn: int = 5,
     distance_metric: str = "hellinger",
+    legacy_bug: bool = False,
 ) -> nx.Graph:
     """Build a k-NN graph over topic vectors for the diffusion step.
 
@@ -207,6 +208,8 @@ def build_diffusion_graph(
         topic_vectors:   (n_topics, vocab_size) array from ``train_ensemble``.
         knn:             Number of nearest neighbours per topic node.
         distance_metric: 'hellinger' | 'cosine' | 'euclidean'.
+        legacy_bug:      If True, use the original AToMS-LP FAISS conversion
+                         (sq_l2 / sqrt(2)) for exact historical reproducibility.
 
     Returns:
         Undirected NetworkX graph with ``weight`` = distance on each edge.
@@ -215,8 +218,7 @@ def build_diffusion_graph(
 
     if _FAISS_OK:
         sq_D, I = _build_faiss_knn(topic_vectors, knn, distance_metric)
-        # Convert FAISS squared-L2 to requested metric (fixed formula)
-        distances = faiss_sq_l2_to_distance(sq_D, distance_metric)
+        distances = faiss_sq_l2_to_distance(sq_D, distance_metric, legacy_bug=legacy_bug)
     else:
         log.warning("FAISS not available; using O(n²) fallback for diffusion graph.")
         distances, I = _build_scipy_knn(topic_vectors, knn, distance_metric)

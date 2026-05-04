@@ -35,6 +35,7 @@ from scipy.spatial.distance import pdist, squareform
 
 from ._math import (
     hellinger_matrix,
+    hellinger_matrix_cross,
     faiss_sq_l2_to_distance,
     prepare_faiss_vectors,
 )
@@ -92,6 +93,7 @@ def _faiss_knn_distance_matrix(
     topic_vectors: ndarray,
     knn: int,
     distance_metric: str,
+    legacy_bug: bool = False,
 ) -> ndarray:
     """Build sparse symmetric distance matrix via FAISS kNN.
 
@@ -108,8 +110,8 @@ def _faiss_knn_distance_matrix(
     sq_D, I = index.search(query, k_actual + 1)
     sq_D, I = sq_D[:, 1:], I[:, 1:]  # exclude self
 
-    # Convert to true metric distances
-    dist_vals = faiss_sq_l2_to_distance(sq_D, distance_metric)
+    # Convert to true metric distances (or legacy buggy distances if requested)
+    dist_vals = faiss_sq_l2_to_distance(sq_D, distance_metric, legacy_bug=legacy_bug)
 
     # Symmetrise into full n×n matrix
     mat = np.zeros((n, n), dtype=np.float32)
@@ -154,6 +156,7 @@ def build_topic_dendrogram(
     knn: int = 100,
     linkage_method: str = "ward",
     distance_metric: str = "hellinger",
+    legacy_bug: bool = False,
 ) -> tuple[ndarray, float, float]:
     """Build a hierarchical clustering dendrogram over topic vectors.
 
@@ -167,6 +170,8 @@ def build_topic_dendrogram(
         knn:             k for the FAISS approximate neighbour search.
         linkage_method:  Scipy linkage method ('ward' | 'complete' | 'average' | 'single').
         distance_metric: 'hellinger' | 'cosine' | 'euclidean'.
+        legacy_bug:      If True, use the original AToMS-LP FAISS conversion for
+                         exact historical reproducibility of thesis/CAMSAP 2025 results.
 
     Returns:
         (Z, min_height, max_height)
@@ -175,11 +180,13 @@ def build_topic_dendrogram(
         - max_height: Distance of the last (largest) merge.
     """
     log.info(
-        "Building %s dendrogram (knn=%d, metric=%s) for %d topics …",
-        linkage_method, knn, distance_metric, topic_vectors.shape[0],
+        "Building %s dendrogram (knn=%d, metric=%s%s) for %d topics …",
+        linkage_method, knn, distance_metric,
+        " [LEGACY BUG MODE]" if legacy_bug else "",
+        topic_vectors.shape[0],
     )
     if _FAISS_OK:
-        mat = _faiss_knn_distance_matrix(topic_vectors, knn, distance_metric)
+        mat = _faiss_knn_distance_matrix(topic_vectors, knn, distance_metric, legacy_bug=legacy_bug)
     else:
         log.warning("FAISS unavailable; using exact kNN fallback for dendrogram.")
         mat = _fallback_knn_distance_matrix(topic_vectors, knn, distance_metric)
@@ -238,7 +245,7 @@ def compute_embedding(
     embedding_method: str = "phate",
     knn: int = 5,
     **method_kwargs,
-) -> ndarray:
+) -> tuple[ndarray, object]:
     """Embed the topic-distance matrix into low-dimensional space.
 
     Dispatches to PHATE, UMAP, t-SNE, or PCA based on ``embedding_method``.
@@ -253,23 +260,26 @@ def compute_embedding(
                           (e.g. n_components, gamma for PHATE).
 
     Returns:
-        (n_topics, n_components) embedding array.
+        Tuple of (embedding, operator) where:
+        - embedding: (n_topics, n_components) array.
+        - operator:  Fitted PHATE operator (for out-of-sample projection via
+                     project_distributions_onto_embedding), or None for other methods.
     """
     m = embedding_method.lower().replace("-", "").replace("_", "")
 
     if m == "phate":
         return _embed_phate(distance_matrix, knn=knn, **method_kwargs)
     elif m == "umap":
-        return _embed_umap(distance_matrix, knn=knn, **method_kwargs)
+        return _embed_umap(distance_matrix, knn=knn, **method_kwargs), None
     elif m in ("tsne", "tsne"):
-        return _embed_tsne(distance_matrix, **method_kwargs)
+        return _embed_tsne(distance_matrix, **method_kwargs), None
     elif m == "pca":
-        return _embed_pca(distance_matrix, **method_kwargs)
+        return _embed_pca(distance_matrix, **method_kwargs), None
     else:
         raise ValueError(f"Unsupported embedding_method: '{embedding_method}'")
 
 
-def _embed_phate(mat: ndarray, knn: int = 5, **kwargs) -> ndarray:
+def _embed_phate(mat: ndarray, knn: int = 5, **kwargs) -> tuple[ndarray, object]:
     try:
         import phate  # type: ignore[import]
     except ImportError as exc:
@@ -280,7 +290,62 @@ def _embed_phate(mat: ndarray, knn: int = 5, **kwargs) -> ndarray:
     op = phate.PHATE(knn=knn, knn_dist="precomputed", **kwargs)
     embedding = op.fit_transform(mat)
     log.info("PHATE embedding shape: %s.", embedding.shape)
-    return embedding
+    return embedding, op
+
+
+def project_distributions_onto_embedding(
+    reference_vectors: ndarray,
+    new_vectors: ndarray,
+    phate_operator: object,
+    distance_metric: str = "hellinger",
+) -> ndarray:
+    """Project out-of-sample distributions into an existing PHATE embedding.
+
+    Computes the cross-distance matrix from new_vectors to reference_vectors,
+    then calls phate_operator.transform() to map each point into the fitted
+    diffusion coordinate space.
+
+    This reproduces the "Map Authors/Documents to Hellinger-PHATE Embeddings"
+    cells from AToMS_HRG_Longitudinal_Analysis.ipynb.
+
+    Args:
+        reference_vectors: (n_topics, vocab_size) — the topic vectors used to
+                           fit the PHATE operator.
+        new_vectors:       (n_points, vocab_size) — author or doc distributions
+                           to project (e.g. author_ct_distns values stacked).
+        phate_operator:    Fitted phate.PHATE instance returned by compute_embedding.
+        distance_metric:   Must match the metric used for the original embedding.
+                           Currently only 'hellinger' is supported for projection.
+
+    Returns:
+        (n_points, n_components) embedding coordinates in PHATE space.
+    """
+    if phate_operator is None:
+        raise ValueError(
+            "project_distributions_onto_embedding requires a fitted PHATE operator. "
+            "Projection is not supported for UMAP, t-SNE, or PCA."
+        )
+    m = distance_metric.lower()
+    if m == "hellinger":
+        cross_dist = hellinger_matrix_cross(new_vectors, reference_vectors)
+    elif m == "cosine":
+        from sklearn.metrics.pairwise import cosine_distances
+        cross_dist = cosine_distances(
+            new_vectors.astype(np.float64), reference_vectors.astype(np.float64)
+        )
+    elif m == "euclidean":
+        from scipy.spatial.distance import cdist as _cdist
+        cross_dist = _cdist(
+            new_vectors.astype(np.float64), reference_vectors.astype(np.float64),
+            metric="euclidean",
+        )
+    else:
+        raise ValueError(f"Unsupported distance_metric for projection: '{distance_metric}'")
+
+    projected = phate_operator.transform(cross_dist)
+    log.info("Projected %d distributions into PHATE space: shape %s.",
+             len(new_vectors), projected.shape)
+    return projected
 
 
 def _embed_umap(mat: ndarray, knn: int = 15, **kwargs) -> ndarray:

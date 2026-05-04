@@ -178,6 +178,110 @@ def plot_phate_embedding(
     return fig_c, fig_t
 
 
+def plot_author_doc_embeddings(
+    topic_embedding: ndarray,
+    cluster_labels: ndarray,
+    author_embedding: ndarray,
+    doc_embedding: ndarray,
+    output_dir: str | Path,
+    prefix: str = "",
+    cfg: Optional[PipelineConfig] = None,
+    elev: float = 20.0,
+    azim: float = 45.0,
+) -> tuple[plt.Figure, plt.Figure]:
+    """Overlay author and document PHATE projections on top of the topic manifold.
+
+    Topics are drawn as a faint background; authors/docs are overlaid as
+    smaller markers.  Reproduces the "Map Authors/Documents to Hellinger-PHATE
+    Embeddings" figures from AToMS_HRG_Longitudinal_Analysis.ipynb.
+
+    Args:
+        topic_embedding:  (n_topics, n_components) topic PHATE coordinates.
+        cluster_labels:   (n_topics,) cluster IDs — used for topic background colouring.
+        author_embedding: (n_authors, n_components) projected author coordinates.
+        doc_embedding:    (n_docs, n_components) projected document coordinates.
+        output_dir:       Directory where figures are saved.
+        prefix:           Filename prefix.
+        cfg:              PipelineConfig for DPI.
+        elev, azim:       3-D view angles.
+
+    Returns:
+        (fig_authors, fig_docs)
+    """
+    dpi     = cfg.visualization.figure_dpi if cfg else 300
+    fig_dir = _figure_dir(output_dir)
+    n_3d    = topic_embedding.shape[1] >= 3
+
+    n_clusters = len(np.unique(cluster_labels))
+    cmap_c     = cm.get_cmap("rainbow", n_clusters)
+    uniq       = {lbl: i for i, lbl in enumerate(sorted(np.unique(cluster_labels)))}
+    colours_c  = np.array([cmap_c(uniq[lbl] / n_clusters) for lbl in cluster_labels])
+
+    def _base_ax(fig_obj):
+        if n_3d:
+            ax = fig_obj.add_subplot(111, projection="3d")
+            ax.set_facecolor("none")
+            ax.view_init(elev=elev, azim=azim)
+            ax.scatter(
+                topic_embedding[:, 0], topic_embedding[:, 1], topic_embedding[:, 2],
+                c=colours_c, marker="o", s=12, alpha=0.25, edgecolor="none",
+                label="Topics",
+            )
+            ax.set_xlabel("PHATE 1"); ax.set_ylabel("PHATE 2"); ax.set_zlabel("PHATE 3")
+            ax.set_xticklabels([]); ax.set_yticklabels([]); ax.set_zticklabels([])
+        else:
+            ax = fig_obj.add_subplot(111)
+            ax.scatter(
+                topic_embedding[:, 0], topic_embedding[:, 1],
+                c=colours_c, marker="o", s=12, alpha=0.25, edgecolor="none",
+                label="Topics",
+            )
+            ax.set_xlabel("PHATE 1"); ax.set_ylabel("PHATE 2")
+        return ax
+
+    # ── Author overlay ───────────────────────────────────────────────────
+    fig_a = plt.figure(figsize=(10, 8))
+    ax_a  = _base_ax(fig_a)
+    if n_3d:
+        ax_a.scatter(
+            author_embedding[:, 0], author_embedding[:, 1], author_embedding[:, 2],
+            c="crimson", marker="^", s=8, alpha=0.6, edgecolor="none",
+            label="Authors",
+        )
+    else:
+        ax_a.scatter(
+            author_embedding[:, 0], author_embedding[:, 1],
+            c="crimson", marker="^", s=8, alpha=0.6, edgecolor="none",
+            label="Authors",
+        )
+    ax_a.set_title("Author distributions projected onto topic manifold")
+    ax_a.legend(loc="upper right", fontsize=8)
+    path_a = fig_dir / f"{prefix}phate_authors.pdf"
+    _save(fig_a, path_a, dpi)
+
+    # ── Document overlay ─────────────────────────────────────────────────
+    fig_d = plt.figure(figsize=(10, 8))
+    ax_d  = _base_ax(fig_d)
+    if n_3d:
+        ax_d.scatter(
+            doc_embedding[:, 0], doc_embedding[:, 1], doc_embedding[:, 2],
+            c="royalblue", marker=".", s=4, alpha=0.35, edgecolor="none",
+            label="Documents",
+        )
+    else:
+        ax_d.scatter(
+            doc_embedding[:, 0], doc_embedding[:, 1],
+            c="royalblue", marker=".", s=4, alpha=0.35, edgecolor="none",
+            label="Documents",
+        )
+    ax_d.set_title("Document distributions projected onto topic manifold")
+    ax_d.legend(loc="upper right", fontsize=8)
+    path_d = fig_dir / f"{prefix}phate_docs.pdf"
+    _save(fig_d, path_d, dpi)
+
+    return fig_a, fig_d
+
+
 # ---------------------------------------------------------------------------
 # Dendrogram
 # ---------------------------------------------------------------------------

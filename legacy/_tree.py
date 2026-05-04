@@ -5,22 +5,33 @@ Provides:
   TreeNode                     — binary-tree node carrying author-topic distributions
   fast_encode_tree_structure   — builds the full encoded tree from a scipy linkage matrix
 
-Ported from:
-  AToMS-LP/AToMS/fast_encode_tree (Cython implementation)
-  mstml/fast_encode_tree/fast_encode_tree_py.py (pure-Python fallback)
+Cython fast path
+----------------
+If fast_encode_tree.pyx has been compiled (``python legacy/setup.py build_ext
+--inplace`` from the repo root), this module re-exports TreeNode and
+fast_encode_tree_structure directly from the compiled extension — identical to
+the AToMS-LP Cython implementation and substantially faster for large corpora.
 
-The tree is used by _scoring.py to compute HRG link-likelihood scores and
-author meta-topic distributions after dendrogram truncation.
+If the compiled extension is absent (e.g. fresh clone without building), this
+module falls back to a numpy-vectorised pure-Python implementation that
+produces identical results.
+
+To compile:
+    cd Multiscale-Topic-Manifold-Learning
+    python legacy/setup.py build_ext --inplace
 """
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 from numpy import ndarray
 
+log = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
-# TreeNode
+# Pure-Python fallback (always defined first)
 # ---------------------------------------------------------------------------
 
 class TreeNode:
@@ -77,10 +88,6 @@ class TreeNode:
         self.left_right_link_prob = float(left_right_link_prob)
         self.original_leaf_ids = original_leaf_ids if original_leaf_ids is not None else set()
 
-    # ------------------------------------------------------------------
-    # Pickle support
-    # ------------------------------------------------------------------
-
     def __reduce__(self):
         args = (
             self.id, self.type, self.distance,
@@ -89,10 +96,6 @@ class TreeNode:
             self.left_right_link_prob, self.original_leaf_ids,
         )
         return self.__class__, args
-
-    # ------------------------------------------------------------------
-    # Convenience helpers
-    # ------------------------------------------------------------------
 
     def is_leaf(self) -> bool:
         return self.left is None and self.right is None
@@ -116,142 +119,116 @@ class TreeNode:
         return ids
 
 
-# ---------------------------------------------------------------------------
-# Link-probability helper
-# ---------------------------------------------------------------------------
-
 def calculate_left_right_link_prob(
     left_probs: ndarray,
     right_probs: ndarray,
     G,
     author_index_map: "dict[int, int]",
 ) -> float:
-    """MLE probability that a co-author edge crosses the left/right split.
-
-    For each edge (u, v) in G, compute the probability that u is in the left
-    subtree AND v is in the right subtree (or vice versa), then normalise by
-    the expected number of such cross-links.
-
-    Args:
-        left_probs:       (n_authors,) probability of each author being in left subtree.
-        right_probs:      (n_authors,) probability of each author being in right subtree.
-        G:                NetworkX graph of the co-author network.
-        author_index_map: Mapping author_id → row index in left_probs / right_probs.
-
-    Returns:
-        Link probability in [0, 1].  Returns 0.0 when denominator is zero.
-    """
-    numerator = 0.0
-
+    """MLE probability that a co-author edge crosses the left/right split."""
+    n = len(left_probs)
+    u_idxs, v_idxs = [], []
     for u, v in G.edges():
         if u not in author_index_map or v not in author_index_map:
             continue
-        u_idx = author_index_map[u]
-        v_idx = author_index_map[v]
-        if u_idx >= len(left_probs) or v_idx >= len(left_probs):
-            continue
+        ui, vi = author_index_map[u], author_index_map[v]
+        if ui < n and vi < n:
+            u_idxs.append(ui)
+            v_idxs.append(vi)
 
-        left_u  = left_probs[u_idx]  * (1.0 - right_probs[u_idx])
-        right_v = right_probs[v_idx] * (1.0 - left_probs[v_idx])
-        left_v  = left_probs[v_idx]  * (1.0 - right_probs[v_idx])
-        right_u = right_probs[u_idx] * (1.0 - left_probs[u_idx])
+    if u_idxs:
+        ui = np.asarray(u_idxs, dtype=np.intp)
+        vi = np.asarray(v_idxs, dtype=np.intp)
+        lu = left_probs[ui];  ru = right_probs[ui]
+        lv = left_probs[vi];  rv = right_probs[vi]
+        numerator = float(np.sum((lu * (1.0 - ru)) * (rv * (1.0 - lv))
+                                 + (lv * (1.0 - rv)) * (ru * (1.0 - lu))))
+    else:
+        numerator = 0.0
 
-        numerator += left_u * right_v + left_v * right_u
-
-    expected_left  = sum(
-        left_probs[i] * (1.0 - right_probs[i]) for i in range(len(left_probs))
-    )
-    expected_right = sum(
-        right_probs[i] * (1.0 - left_probs[i]) for i in range(len(right_probs))
-    )
+    expected_left  = float(np.dot(left_probs,  1.0 - right_probs))
+    expected_right = float(np.dot(right_probs, 1.0 - left_probs))
     denominator = expected_left * expected_right
     return numerator / denominator if denominator > 0.0 else 0.0
 
-
-# ---------------------------------------------------------------------------
-# Tree encoder
-# ---------------------------------------------------------------------------
 
 def fast_encode_tree_structure(
     Z: ndarray,
     author_chunk_topic_distns: "dict[int, ndarray]",
     G,
 ) -> "tuple[TreeNode, dict[int, int]]":
-    """Build an encoded binary tree from a scipy linkage matrix.
-
-    Each leaf corresponds to one chunk-topic (column of the topic-vector
-    matrix); each internal node is formed by merging the two nodes indicated
-    by the linkage row.
-
-    At every internal node we compute:
-      * the sum of left + right author-topic probability vectors
-      * the HRG link probability between the left and right subtrees
-
-    Args:
-        Z:                         Linkage matrix, shape (n_topics − 1, 4).
-        author_chunk_topic_distns: Mapping author_id → (n_topics,) float array.
-        G:                         NetworkX co-author graph.
-
-    Returns:
-        (root_node, author_index_map) where author_index_map maps
-        author_id → row index inside each node's author_topic_space_probs.
-    """
+    """Build an encoded binary tree from a scipy linkage matrix."""
     n_topics  = Z.shape[0] + 1
     n_authors = len(author_chunk_topic_distns)
 
-    # Contiguous index map for authors
     author_index_map: dict[int, int] = {
         a: i for i, a in enumerate(author_chunk_topic_distns.keys())
     }
 
-    # Build (n_authors × n_topics) probability matrix
     author_topic_probs = np.zeros((n_authors, n_topics), dtype=np.float64)
     for author, distn in author_chunk_topic_distns.items():
-        idx = author_index_map[author]
-        author_topic_probs[idx, :] = distn
+        author_topic_probs[author_index_map[author], :] = distn
 
-    # Create leaf nodes
-    node_map: dict[int, TreeNode] = {}
-    for i in range(n_topics):
-        node_map[i] = TreeNode(
-            id=i,
-            type=0,
-            distance=0.0,
-            author_topic_space_probs=author_topic_probs[:, i],
-            original_leaf_ids={i},
-        )
+    node_map: dict[int, TreeNode] = {
+        i: TreeNode(id=i, type=0, distance=0.0,
+                    author_topic_space_probs=author_topic_probs[:, i],
+                    original_leaf_ids={i})
+        for i in range(n_topics)
+    }
 
-    # Build internal nodes from linkage rows
+    # Precompute edge index arrays once — avoids repeated dict lookups per merge.
+    _eu, _ev = [], []
+    for u, v in G.edges():
+        if u in author_index_map and v in author_index_map:
+            ui, vi = author_index_map[u], author_index_map[v]
+            if ui < n_authors and vi < n_authors:
+                _eu.append(ui); _ev.append(vi)
+    _edge_u = np.asarray(_eu, dtype=np.intp)
+    _edge_v = np.asarray(_ev, dtype=np.intp)
+
     for row in range(Z.shape[0]):
-        left_idx  = int(Z[row, 0])
-        right_idx = int(Z[row, 1])
-        dist      = float(Z[row, 2])
+        left_node  = node_map[int(Z[row, 0])]
+        right_node = node_map[int(Z[row, 1])]
+        dist       = float(Z[row, 2])
 
-        left_node  = node_map[left_idx]
-        right_node = node_map[right_idx]
+        lp = left_node.author_topic_space_probs
+        rp = right_node.author_topic_space_probs
 
-        combined_probs = (
-            left_node.author_topic_space_probs +
-            right_node.author_topic_space_probs
-        )
-        link_prob = calculate_left_right_link_prob(
-            left_node.author_topic_space_probs,
-            right_node.author_topic_space_probs,
-            G,
-            author_index_map,
-        )
+        if _edge_u.size:
+            lu = lp[_edge_u]; ru = rp[_edge_u]
+            lv = lp[_edge_v]; rv = rp[_edge_v]
+            numerator = float(np.sum((lu * (1.0 - ru)) * (rv * (1.0 - lv))
+                                     + (lv * (1.0 - rv)) * (ru * (1.0 - lu))))
+        else:
+            numerator = 0.0
+        el = float(np.dot(lp, 1.0 - rp))
+        er = float(np.dot(rp, 1.0 - lp))
+        link_prob = numerator / (el * er) if el * er > 0.0 else 0.0
 
         new_id = n_topics + row
         node_map[new_id] = TreeNode(
-            id=new_id,
-            type=1,
-            distance=dist,
-            author_topic_space_probs=combined_probs,
-            left=left_node,
-            right=right_node,
+            id=new_id, type=1, distance=dist,
+            author_topic_space_probs=lp + rp,
+            left=left_node, right=right_node,
             left_right_link_prob=link_prob,
             original_leaf_ids=left_node.original_leaf_ids | right_node.original_leaf_ids,
         )
 
     root = node_map[n_topics + Z.shape[0] - 1]
     return root, author_index_map
+
+
+# ---------------------------------------------------------------------------
+# Override with Cython extension if compiled
+# ---------------------------------------------------------------------------
+try:
+    from .fast_encode_tree import (  # type: ignore[import]
+        TreeNode as TreeNode,
+        fast_encode_tree_structure as fast_encode_tree_structure,
+    )
+except ImportError:
+    log.warning(
+        "Cython extension 'fast_encode_tree' not found — falling back to pure-Python "
+        "tree encoding. This will be significantly slower for large corpora. "
+        "Build the extension with: python legacy/setup.py build_ext --inplace"
+    )

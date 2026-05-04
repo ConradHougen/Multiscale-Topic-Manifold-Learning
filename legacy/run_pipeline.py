@@ -130,6 +130,7 @@ def stage_distributions(args, cfg, state: dict, out: Path) -> dict:
         tvecs,
         knn=cfg.diffusion.knn,
         distance_metric=args.distance_metric,
+        legacy_bug=args.reproduce_legacy_bug,
     )
 
     diff_cfg = cfg.diffusion
@@ -160,6 +161,7 @@ def stage_manifold(args, cfg, state: dict, out: Path) -> dict:
         build_topic_dendrogram,
         cut_dendrogram,
         compute_embedding,
+        project_distributions_onto_embedding,
     )
     import numpy as np
 
@@ -170,6 +172,7 @@ def stage_manifold(args, cfg, state: dict, out: Path) -> dict:
         knn=cfg.dendrogram.knn,
         linkage_method=args.linkage_method,
         distance_metric=args.distance_metric,
+        legacy_bug=args.reproduce_legacy_bug,
     )
     cluster_labels = cut_dendrogram(Z, args.cut_height, min_h, max_h)
 
@@ -177,7 +180,7 @@ def stage_manifold(args, cfg, state: dict, out: Path) -> dict:
 
     emb_kwargs = cfg.embeddings.get_kwargs(args.embedding_method)
     emb_knn    = emb_kwargs.pop("knn", cfg.embeddings.phate.knn)
-    embedding  = compute_embedding(
+    embedding, phate_op = compute_embedding(
         dist_mat, args.embedding_method, knn=emb_knn, **emb_kwargs
     )
 
@@ -196,9 +199,38 @@ def stage_manifold(args, cfg, state: dict, out: Path) -> dict:
     _save(embedding,      out / "embedding.pkl")
     _save(time_labels,    out / "time_labels.pkl")
 
-    return {**state, "Z": Z, "min_h": min_h, "max_h": max_h,
-            "cluster_labels": cluster_labels, "dist_mat": dist_mat,
-            "embedding": embedding, "time_labels": time_labels}
+    result = {**state, "Z": Z, "min_h": min_h, "max_h": max_h,
+              "cluster_labels": cluster_labels, "dist_mat": dist_mat,
+              "embedding": embedding, "time_labels": time_labels,
+              "phate_op": phate_op}
+
+    # Project author and doc distributions into embedding space (PHATE only).
+    # Reproduces "Map Authors/Documents to Hellinger-PHATE Embeddings" from
+    # AToMS_HRG_Longitudinal_Analysis.ipynb.
+    if phate_op is not None:
+        log.info("[4/6] Projecting author distributions onto embedding …")
+        author_vecs = np.array(list(state["author_ct"].values()), dtype=np.float64)
+        author_ids  = list(state["author_ct"].keys())
+        author_emb  = project_distributions_onto_embedding(
+            tvecs, author_vecs, phate_op, args.distance_metric
+        )
+        _save({"ids": author_ids, "embedding": author_emb}, out / "author_embedding.pkl")
+        result["author_emb"] = author_emb
+        result["author_emb_ids"] = author_ids
+
+        log.info("[4/6] Projecting document distributions onto embedding …")
+        doc_vecs = np.array(list(state["doc_ct"].values()), dtype=np.float64)
+        doc_ids  = list(state["doc_ct"].keys())
+        doc_emb  = project_distributions_onto_embedding(
+            tvecs, doc_vecs, phate_op, args.distance_metric
+        )
+        _save({"ids": doc_ids, "embedding": doc_emb}, out / "doc_embedding.pkl")
+        result["doc_emb"] = doc_emb
+        result["doc_emb_ids"] = doc_ids
+    else:
+        log.info("[4/6] Skipping author/doc projection (only supported for PHATE).")
+
+    return result
 
 
 def stage_scoring(args, cfg, state: dict, out: Path) -> dict:
@@ -313,6 +345,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--skip_manifold",    action="store_true")
     p.add_argument("--skip_scoring",     action="store_true")
     p.add_argument("--skip_visualize",   action="store_true")
+    p.add_argument("--reproduce_legacy_bug", action="store_true",
+                   help="Use the original AToMS-LP FAISS Hellinger conversion "
+                        "(sq_l2 / sqrt(2)) instead of the correct sqrt(sq_l2 / 2). "
+                        "Set this flag to bitwise-reproduce thesis/CAMSAP 2025 results. "
+                        "Has no effect for non-Hellinger distance metrics.")
     p.add_argument("--log_level",        default="INFO",
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return p
@@ -396,6 +433,14 @@ def main(argv=None):
         state["dist_mat"]       = _load(out / "distance_matrix.pkl")
         state["embedding"]      = _load(out / "embedding.pkl")
         state["time_labels"]    = _load(out / "time_labels.pkl")
+        state["phate_op"]       = None  # operator not serialised; projection unavailable
+        for _key, _fname in [("author_emb", "author_embedding.pkl"),
+                              ("doc_emb", "doc_embedding.pkl")]:
+            _p = out / _fname
+            if _p.exists():
+                _blob = _load(_p)
+                state[_key] = _blob["embedding"]
+                state[f"{_key}_ids"] = _blob["ids"]
     else:
         log.info("[4/6] Building dendrogram and embedding …")
         state = stage_manifold(args, cfg, state, out)

@@ -80,7 +80,12 @@ Download `arxiv-metadata-oai-snapshot.json` from
 
 ### Step 2 — Run the pipeline
 
+The pipeline now defaults to the **corrected** FAISS Hellinger conversion
+(`sqrt(d/2)`). To exactly reproduce the original thesis/CAMSAP 2025 figures,
+which were generated with the original AToMS-LP code, add `--reproduce_legacy_bug`:
+
 ```bash
+# Corrected math (default — recommended for all new experiments)
 python -m legacy.run_pipeline \
     --input_file  arxiv-metadata-oai-snapshot.json \
     --output_dir  ./results_camsap \
@@ -91,6 +96,19 @@ python -m legacy.run_pipeline \
     --embedding_method phate \
     --linkage_method   ward \
     --cut_height       0.68
+
+# Exact historical reproduction of thesis/CAMSAP 2025 figures
+python -m legacy.run_pipeline \
+    --input_file  arxiv-metadata-oai-snapshot.json \
+    --output_dir  ./results_historical \
+    --categories  cs.LG stat.AP stat.CO stat.ME stat.ML stat.OT stat.TH \
+    --year_start  2012 \
+    --year_end    2023 \
+    --distance_metric  hellinger \
+    --embedding_method phate \
+    --linkage_method   ward \
+    --cut_height       0.68 \
+    --reproduce_legacy_bug
 ```
 
 All secondary hyperparameters (knn, LDA iterations, diffusion rate, etc.) are
@@ -126,17 +144,29 @@ results_camsap/
 ├── expanded_doc_topic_distns.pkl← {doc_id: (N_total_topics,) array}
 ├── coauthor_graph.pkl           ← nx.Graph with edge weights
 ├── author_ct_distns.pkl         ← diffused author distributions
+├── doc_ct_distns.pkl            ← diffused document distributions
+├── knn_graph.pkl                ← topic diffusion k-NN graph
 ├── dendrogram_Z.pkl             ← scipy linkage matrix (N-1, 4)
 ├── dendrogram_heights.pkl       ← (min_cut_height, max_cut_height) tuple
 ├── cluster_labels.pkl           ← integer array of meta-topic labels
 ├── distance_matrix.pkl          ← full pairwise Hellinger matrix
 ├── embedding.pkl                ← (N_topics, 3) PHATE embedding
+├── author_embedding.pkl         ← {ids, embedding} — author distributions
+│                                   projected into PHATE space (PHATE only)
+├── doc_embedding.pkl            ← {ids, embedding} — document distributions
+│                                   projected into PHATE space (PHATE only)
 ├── doc_scores.pkl               ← OrderedDict doc_id → entropy (desc)
 ├── link_scores.pkl              ← OrderedDict (a1,a2) → score (asc)
 ├── author_ranking.pkl           ← OrderedDict author_id → entropy (desc)
 ├── author_ranking.csv           ← human-readable rankings
 └── figures/                     ← all generated PDFs and PNGs
 ```
+
+`author_embedding.pkl` and `doc_embedding.pkl` are only generated when
+`--embedding_method phate` (the default).  They reproduce the "Map Authors,
+Documents, and Author Communities to Hellinger-PHATE Embeddings" section of
+`AToMS_HRG_Longitudinal_Analysis.ipynb` by calling
+`phate_operator.transform(cross_hellinger_distance_matrix)`.
 
 ### Resuming a partial run
 
@@ -224,6 +254,7 @@ The scientifically meaningful parameters.  Pass as CLI flags.
 | `embedding_method` | `phate` | `phate`, `umap`, `tsne`, `pca` | Manifold embedding |
 | `linkage_method` | `ward` | `ward`, `complete`, `average`, `single` | Hierarchical linkage |
 | `cut_height` | `0.68` | float ∈ [0, 1] | Normalised dendrogram cut height |
+| `reproduce_legacy_bug` | *(off)* | flag | Use original AToMS-LP FAISS conversion (`d/√2` instead of `√(d/2)`) for exact historical reproduction. Has no effect with non-Hellinger metrics. |
 
 ---
 
@@ -267,6 +298,27 @@ embeddings:
     knn: 5
     t: auto
 ```
+
+---
+
+## Performance Notes
+
+### `_tree.py` — HRG Tree Encoding
+
+The AToMS-LP Cython source (`fast_encode_tree.pyx`) is included in
+`legacy/fast_encode_tree.pyx`.  Build it once for full Cython speed:
+
+```bash
+# From the repo root
+pip install cython numpy
+python legacy/setup.py build_ext --inplace
+```
+
+`_tree.py` automatically imports the compiled extension when present; it falls
+back to a numpy-vectorised pure-Python implementation otherwise.  Both paths
+produce identical numerical results.  For the full arXiv corpus (thousands of
+topics, tens of thousands of authors), the compiled extension is substantially
+faster for the tree-encoding stage.
 
 ---
 
@@ -703,7 +755,8 @@ from legacy._topic_models  import create_temporal_chunks, train_ensemble, expand
 from legacy._distributions import (build_coauthor_graph, compute_author_barycenters,
                                     build_diffusion_graph, diffuse_distributions)
 from legacy._manifold      import (compute_pairwise_distances, build_topic_dendrogram,
-                                    cut_dendrogram, compute_embedding)
+                                    cut_dendrogram, compute_embedding,
+                                    project_distributions_onto_embedding)
 from legacy._scoring       import run_scoring
 from legacy._visualization import plot_phate_embedding, generate_meta_topic_wordclouds
 
@@ -743,7 +796,14 @@ author_ct_distns   = diffuse_distributions(knn_graph, author_barycenters)
 Z, min_h, max_h = build_topic_dendrogram(topic_vectors)
 cluster_labels  = cut_dendrogram(Z, cut_height=0.68, min_height=min_h, max_height=max_h)
 dist_matrix     = compute_pairwise_distances(topic_vectors)
-embedding       = compute_embedding(dist_matrix, "phate")
+embedding, phate_op = compute_embedding(dist_matrix, "phate")
+# phate_op is the fitted PHATE operator (None for umap/tsne/pca)
+
+# Project author/doc distributions into PHATE space (PHATE only)
+if phate_op is not None:
+    author_vecs = np.array(list(author_ct_distns.values()))
+    author_emb  = project_distributions_onto_embedding(
+        topic_vectors, author_vecs, phate_op)  # (n_authors, 3)
 
 # Stage 5 — scoring
 results = run_scoring(Z, min_h, max_h, 0.68, author_ct_distns, coauthor_graph, df)
@@ -792,7 +852,12 @@ arxiv-metadata-oai-snapshot.json
   ▼ compute_pairwise_distances() full O(n²) Hellinger matrix for PHATE
   │
   ▼ compute_embedding()        PHATE(knn=5, gamma=0, t=auto, n_components=3)
-  │                            → embedding (N_topics, 3)
+  │                            → (embedding (N_topics, 3), phate_operator)
+  │
+  ▼ project_distributions_onto_embedding()   (PHATE only)
+  │   cross-Hellinger distances from authors/docs to topics
+  │   → phate_operator.transform(cross_dist)
+  │   → author_embedding (N_authors, 3), doc_embedding (N_docs, 3)
   │
   ▼ fast_encode_tree_structure() build HRG binary tree with MLE link probs
   │                            → root TreeNode + author_index_map
