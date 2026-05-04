@@ -1,0 +1,67 @@
+# legacy/config.yaml — Secondary hyperparameter defaults for the MSTML legacy pipeline.
+#
+# These values rarely need to change. Scientifically meaningful primary
+# hyperparameters (categories, year range, distance metric, embedding method,
+# linkage method, cut height, topic model) are passed via CLI or PrimaryConfig.
+#
+# Params are organised into per-algorithm sections so that adding a new topic
+# model or embedding method only requires adding a new named block here — no
+# flat-namespace collisions.
+
+# ── General pipeline settings ────────────────────────────────────────────────
+pipeline:
+  months_per_chunk: 1          # Temporal window size for chunk topic models
+  max_authors_per_doc: 20      # Drop papers with more co-authors than this
+  author_disambig_threshold: 0.90  # Char-trigram cosine similarity cutoff for disambiguation
+
+# ── Vocabulary / text processing ─────────────────────────────────────────────
+text_processing:
+  vocab_low_freq_thresh: 1     # Drop words appearing in ≤ N documents
+  vocab_high_freq_frac: 0.995  # Drop words appearing in > X fraction of documents
+  # LDA-based vocab reduction (run once before chunking to shrink dictionary)
+  vocab_lda:
+    lambda: 0.6                # LDAvis-style term relevance weight λ
+    top_n: 2000                # Keep top-N terms per topic after relevance scoring
+    num_topics: 50             # Topics in the vocab-reduction LDA
+
+# ── Topic model specific params, keyed by model name ─────────────────────────
+# Unknown keys under this section are forwarded as **kwargs to the model class.
+topic_models:
+  lda:
+    docs_per_topic: 100        # Target docs per topic for automatic num_topics computation
+    ngibbs: 50                 # Gibbs sampling iterations per pass
+    npasses: 5                 # Full corpus passes
+    smoothing_gamma: 0.75      # Exponential decay weight for neighbouring chunks (γ^|offset|)
+  bertopic:
+    embedding_model: all-MiniLM-L6-v2  # sentence-transformers model for document embeddings
+
+# ── Diffusion over topic k-NN graph (Step 3) ─────────────────────────────────
+diffusion:
+  knn: 5                       # k for building the topic diffusion graph
+  rate: 0.7                    # Neighbor influence weight per iteration [0, 1]
+  num_iterations: 1            # Message-passing passes over the topic graph
+
+# ── Dendrogram construction (Step 4) ─────────────────────────────────────────
+dendrogram:
+  knn: 100                     # k for FAISS approximate neighbor search when building dendrogram
+
+# ── Embedding method specific params, keyed by method name ───────────────────
+# Unknown keys under this section are forwarded as **kwargs to the method class.
+embeddings:
+  phate:
+    n_components: 3
+    gamma: 0.0                 # 0 = no density regularisation (matches CAMSAP reference)
+    knn: 5                     # k for PHATE diffusion operator
+    t: auto                    # diffusion timescale; 'auto' lets PHATE choose
+  umap:
+    n_components: 3
+    n_neighbors: 15
+  tsne:
+    n_components: 3
+    perplexity: 30.0
+  pca:
+    n_components: 3
+
+# ── Visualization ─────────────────────────────────────────────────────────────
+visualization:
+  figure_dpi: 300
