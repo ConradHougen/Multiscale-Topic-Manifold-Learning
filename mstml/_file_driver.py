@@ -12,11 +12,13 @@ import pandas as pd
 import numpy as np
 import re
 import logging
+import networkx as nx
 from datetime import datetime
 from pathlib import Path
 from bisect import bisect_left
 from math import factorial
 from gensim.utils import simple_preprocess
+import gensim.corpora as corpora
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 from collections import Counter
@@ -572,7 +574,6 @@ def remove_singly_occurring_words(texts, vocab):
 
 def lemmatize_and_update(texts):
     """Lemmatizes words from a set of texts. Returns an updated vocab dictionary also."""
-    import gensim.corpora as corpora
     lemmatizer = WordNetLemmatizer()
 
     # Lemmatize the texts and return an updated vocabulary with the lemmatized texts
@@ -700,7 +701,6 @@ def filter_doc_df_by_specified_authors(doc_df, authId_list):
 
 def filter_all_by_connected_authors(int_data_dir, doc_df, source_G, authId_list):
     """Function to extract subset of docs and network by any connection to authors"""
-    import networkx as nx
     
     if not authId_list:
         print("Error: authId_list was empty")
@@ -769,7 +769,6 @@ def filter_all_by_num_direct_coauthors(int_data_dir, doc_df, source_G, authId_li
 
 def filter_all_by_connected_component_size(int_data_dir, doc_df, source_G, authId_list, smin, smax):
     """Function to extract subset of docs and network by size of connected component"""
-    import networkx as nx
     
     if not authId_list:
         print("Using all authors for conn comp size filter")

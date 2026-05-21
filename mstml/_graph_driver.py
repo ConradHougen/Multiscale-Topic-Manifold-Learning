@@ -9,6 +9,7 @@ import os
 import glob
 import pickle
 import random
+import re
 import networkx as nx
 import hypernetx as hnx
 import pandas as pd
@@ -661,7 +662,6 @@ def graphml_viz_convert_file(dset, dsub, filename, overwrite=False, specific_dir
         if not line:
             break
 
-        import re
         source = re.search(r'(?<=source=").{7}', line)
         target = re.search(r'(?<=target=").{7}', line)
         if source:
@@ -766,7 +766,6 @@ def convert_viz_graphml_to_pairs_file(dset, dsub, filename, specific_directory=N
         if not line:
             break
 
-        import re
         source = re.search(r'(?<=source=").{7}', line)
         target = re.search(r'(?<=target=").{7}', line)
         if source:
