@@ -258,6 +258,213 @@ The scientifically meaningful parameters.  Pass as CLI flags.
 
 ---
 
+## Mathematical Foundations
+
+This section gives a self-contained mathematical justification for each
+algorithmic stage of the pipeline.
+
+### 1. Mixed-Membership Topic Models and the Probability Simplex
+
+The corpus is divided into monthly temporal chunks
+$\{C_1, \ldots, C_T\}$. For each chunk $C_t$, Latent Dirichlet Allocation
+(LDA) estimates $K_t$ **topic-word distributions**
+
+$$\phi_k^{(t)} \in \Delta^{V-1} = \left\{p \in \mathbb{R}^V : p_i \geq 0,\ \textstyle\sum_i p_i = 1\right\}$$
+
+and assigns each document $d \in C_t$ a **topic distribution**
+$\theta_d^{(t)} \in \Delta^{K_t - 1}$.  These are then zero-padded into the
+global topic space of dimension $N = \sum_t K_t$, placing each document's
+probability mass in a contiguous block corresponding to its chunk.
+
+The resulting per-author distributions live on the
+$\Delta^{N-1}$ simplex and constitute **mixed-membership vectors** in the
+sense of the Mixed Membership Stochastic Block Model (MMSB; Airoldi et al.,
+2008): each author $a$ is characterised by a latent membership vector
+$\pi_a \in \Delta^{N-1}$, which encodes the fraction of their intellectual
+activity attributable to each fine-grained topic.  The MMSB predicts the
+probability of a co-authorship edge $(a, b)$ as
+
+$$P(\text{edge} \mid a, b) = \sum_{k,\ell} \pi_a(k)\, \pi_b(\ell)\, B_{k\ell}$$
+
+where $B$ is a $N \times N$ block-interaction matrix.  In this pipeline,
+$B$ is not estimated independently from the edge data but is instead derived
+from the hierarchical topic structure (Stage 5), providing a principled
+prior that ties the block model to the geometry of the topic manifold.
+
+Author mixed-membership vectors $\pi_a$ are obtained as normalised
+**barycenters** — weighted averages of their documents' topic distributions on
+$\Delta^{N-1}$, then smoothed by a Hellinger-distance diffusion step
+(Stage 3) that propagates mass along the topic $k$-NN graph to fill in
+topics that an author has not directly published in.
+
+---
+
+### 2. Information Geometry of Hellinger Distance
+
+All pairwise distances between points on $\Delta^{N-1}$ are measured with
+the **Hellinger distance**
+
+$$H(p, q) = \frac{1}{\sqrt{2}}\,\|\sqrt{p} - \sqrt{q}\|_2
+           = \sqrt{\frac{1}{2}\sum_{k=1}^N \!\left(\sqrt{p_k} - \sqrt{q_k}\right)^2}
+\;\in [0, 1].$$
+
+Its information-geometric interpretation is as follows.  The probability
+simplex $\Delta^{N-1}$ is a **statistical manifold** equipped with the
+**Fisher–Rao metric**
+
+$$g_{ij}(p) = \frac{\delta_{ij}}{p_i}.$$
+
+The square-root map $\Phi : \Delta^{N-1} \to S^{N-1}_+$, $p \mapsto \sqrt{p}$,
+is an isometric embedding of $(\Delta^{N-1}, g)$ into the positive orthant of
+the $(N-1)$-sphere with the round metric.  Under this embedding, the **chord
+distance** between $\Phi(p)$ and $\Phi(q)$ is exactly $\|\sqrt{p} - \sqrt{q}\|_2$,
+so
+
+$$H(p, q) = \frac{1}{\sqrt{2}}\|\Phi(p) - \Phi(q)\|_2$$
+
+is the Euclidean chord distance in the square-root representation, normalised
+to $[0,1]$.  Equivalently, $H(p,q) = \sqrt{1 - \mathrm{BC}(p,q)}$ where
+$\mathrm{BC}(p,q) = \sum_k \sqrt{p_k q_k}$ is the **Bhattacharyya
+coefficient**, and the Fisher–Rao geodesic arc length is
+$d_{\mathrm{FR}}(p,q) = 2\arccos\bigl(\mathrm{BC}(p,q)\bigr) \approx 2H$
+for nearby distributions.
+
+Because $H$ arises from an underlying Euclidean norm on $\sqrt{p}$ vectors,
+it supports Ward linkage and PHATE diffusion with full geometric validity —
+the two algorithmic choices justified below.
+
+---
+
+### 3. Ward Linkage on the Statistical Manifold
+
+The **Ward hierarchical clustering** at Stage 4 operates directly on the
+$N \times N$ Hellinger distance matrix among topic vectors.
+
+Ward's criterion merges the pair of clusters $(A, B)$ that minimises the
+increase in total **within-cluster sum of squares**:
+
+$$\Delta(A, B) = \frac{|A|\,|B|}{|A| + |B|} H^2(\mu_A, \mu_B)$$
+
+where $\mu_C$ denotes the Fréchet mean (centroid) of cluster $C$.  Under
+Hellinger distance, the centroid is the point $\mu_C$ minimising
+$\sum_{p \in C} H^2(p, \mu_C)$, which in the square-root representation
+reduces to the ordinary Euclidean centroid $\bar{v}_C = \frac{1}{|C|}\sum_{p \in C} \sqrt{p}$,
+renormalised to the simplex.
+
+Because $H(p,q) = \frac{1}{\sqrt 2}\|\sqrt p - \sqrt q\|_2$ is a Euclidean
+distance (up to the constant $1/\sqrt{2}$), the **Lance–Williams update** is
+valid:
+
+$$d(A \cup B,\, C)^2 = \frac{|A|+|C|}{|A|+|B|+|C|} d(A,C)^2
+                     + \frac{|B|+|C|}{|A|+|B|+|C|} d(B,C)^2
+                     - \frac{|C|}{|A|+|B|+|C|} d(A,B)^2.$$
+
+Geometrically, Ward linkage partitions the topic simplex into **maximally
+compact, well-separated meta-topic clusters**, each representing a coherent
+research community.  The merge heights of the resulting dendrogram are in
+true Hellinger units (after the FAISS bug fix described below), so the
+normalised cut height parameter `cut_height` ∈ [0, 1] has a direct
+information-geometric meaning: it selects the granularity at which topic
+distributions are considered distinct communities.
+
+---
+
+### 4. Hellinger–PHATE and Diffusion on the Topic Manifold
+
+To embed the $N$ topic distributions into a low-dimensional coordinate
+system, the pipeline uses **PHATE** (Potential of Heat-diffusion for
+Affinity-based Transition Embedding; Moon et al., 2019) with the precomputed
+Hellinger distance matrix as input.
+
+PHATE builds an affinity matrix
+
+$$K_{ij} = \exp\!\left(-\frac{H(p_i, p_j)^2}{\sigma_i^2}\right)$$
+
+where $\sigma_i$ is a local bandwidth estimated from the $k$-nearest
+neighbours of $p_i$.  Row-normalising $K$ yields the **Markov diffusion
+operator** $P$; the $(i,j)$ entry of $P^t$ is the probability of reaching
+$p_j$ from $p_i$ by a $t$-step random walk on the topic graph.  PHATE then
+forms the **diffusion potential**
+
+$$U_{ij}^{(t)} = -\log P^t_{ij}$$
+
+and embeds via multi-dimensional scaling (MDS) on the resulting potential
+distances, producing coordinates that simultaneously preserve local neighbourhood
+structure and global topological relationships.
+
+The information-geometric justification for using Hellinger as the input
+metric is twofold.  First, because $H$ derives from the Fisher–Rao metric, it
+is **invariant to reparametrisation** of the probability simplex: equal
+Hellinger distances correspond to equal distinguishability under any statistical
+test, not just squared-Euclidean displacement.  Second, the square-root
+embedding $\Phi(p) = \sqrt{p}$ places the simplex on a sphere, whose curved
+geometry is naturally captured by the diffusion operator's multi-scale
+random walk — PHATE's $t$ parameter effectively integrates over the spectrum
+of the Laplace–Beltrami operator on this manifold.
+
+The result is a three-dimensional **topic manifold** in which Euclidean
+proximity reflects shared information-theoretic content, and the temporal
+trajectory of topics can be read from the time-coloured embedding.  Author
+and document distributions are projected into the same space via
+$\operatorname{phate.transform}(D_{\text{cross}})$, where $D_{\text{cross}}$
+is the $(n_{\text{new}} \times N)$ cross-Hellinger distance matrix from new
+distributions to the training topics.
+
+---
+
+### 5. Hierarchical Random Graph Link Inference
+
+The interdisciplinarity scores are grounded in the **Hierarchical Random
+Graph** (HRG) framework of Clauset, Moore & Newman (2008).
+
+Given a dendrogram $\mathcal{D}$ over $N$ topics, every internal node $r$
+defines a bipartition of the leaves into a left subtree $L_r$ and a right
+subtree $R_r$.  Under the HRG model, each co-authorship edge $(a,b)$
+independently exists with probability $p_r$, where $r$ is the lowest common
+ancestor (LCA) of the meta-topics predominantly occupied by $a$ and $b$.
+The maximum likelihood estimate of $p_r$ is
+
+$$\hat{p}_r = \frac{E_r}{|L_r|\,|R_r|}$$
+
+where $E_r$ is the number of co-author edges whose endpoints fall on opposite
+sides of the split at $r$.
+
+Because authors have **mixed membership** (their mass is spread across many
+topics rather than assigned to exactly one), the pipeline uses expected
+edge counts.  Defining the probability that author $a$ belongs to the left
+subtree at node $r$ as $\ell_r(a) = \sum_{k \in L_r} \pi_a(k)$, the
+contribution of edge $(a,b)$ to $E_r$ is
+
+$$\ell_r(a)\bigl(1 - \ell_r(b)\bigr) + \ell_r(b)\bigl(1 - \ell_r(a)\bigr)$$
+
+and the denominator generalises to
+$\hat{p}_r = \mathrm{numerator} / \bigl(\mathbb{E}[|L_r|]\,\mathbb{E}[|R_r|]\bigr)$.
+
+The **link likelihood score** for a co-author pair $(a, b)$ is then
+
+$$s(a, b) = \sum_{k,\ell} \pi_a(k)\,\pi_b(\ell)\,\mathrm{LPM}_{k\ell}$$
+
+where $\mathrm{LPM}_{k\ell} = \hat{p}_{\mathrm{LCA}(k,\ell)}$ is the
+link-probability matrix entry for meta-topics $k$ and $\ell$.  This is
+precisely the MMSB edge probability $\pi_a^{\top} B\, \pi_b$ with
+$B = \mathrm{LPM}$, closing the loop from Stage 1.
+
+**Low** $s(a,b)$ means the collaboration is *surprising* given the topic
+hierarchy — the two authors occupy distant branches of the dendrogram —
+which operationalises interdisciplinarity as anomaly under the fitted
+hierarchical block model.
+
+**Author interdisciplinarity** is the **Shannon entropy** of the
+distribution $\pi_a$ over meta-topics at the chosen cut height:
+
+$$\mathcal{I}(a) = H(\pi_a) = -\sum_{k=1}^{M} \pi_a(k)\,\log_2 \pi_a(k)$$
+
+where $M$ is the number of meta-topics.  The entropy is maximised at
+$\log_2 M$ bits when $\pi_a$ is uniform — an author equally active in all
+meta-topics — and zero when $\pi_a$ is a point mass (fully specialised).
+
+---
+
 ## Secondary Hyperparameters (`config.yaml`)
 
 Stable algorithmic settings.  Override by passing `--config my_override.yaml`.
