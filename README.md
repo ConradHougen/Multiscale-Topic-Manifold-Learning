@@ -2,7 +2,7 @@
 
 Code for the papers:
 - *"A Multiscale Geometric Method for Capturing Relational Topic Alignment"* (CAMSAP 2025)
-- *"Multiscale Topic Manifold Learning for Understanding Interdisciplinarity in Co-Authored Articles"*
+- *"Network Models for Learning Uncertain and Multimodal Data"* (dissertation)
 
 ---
 
@@ -163,12 +163,11 @@ Multiscale-Topic-Manifold-Learning/
   publisher = {IEEE}
 }
 
-@article{hougen2025mstml_arxiv,
-  author    = {Conrad D. Hougen and Karl T. Pazdernik and Alfred O. Hero},
-  title     = {Multiscale Topic Manifold Learning for Understanding Interdisciplinarity
-               in Co-Authored Articles},
-  journal   = {arXiv preprint},
-  year      = {2025}
+@phdthesis{hougen2025dissertation,
+  author = {Conrad D. Hougen},
+  title  = {Network Models for Learning Uncertain and Multimodal Data},
+  school = {},
+  year   = {2025}
 }
 ```
 
