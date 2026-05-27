@@ -94,27 +94,47 @@ def _faiss_knn_distance_matrix(
     knn: int,
     distance_metric: str,
     legacy_bug: bool = False,
+    linkage_method: str = "ward",
 ) -> ndarray:
     """Build sparse symmetric distance matrix via FAISS kNN.
 
-    Entries for non-kNN pairs remain 0 (approximation used by the original
-    AToMS-LP pipeline; Ward linkage still finds meaningful clusters because
-    knn=100 captures most of the local structure).
+    Legacy bug reproduction notes (legacy_bug=True):
+    - AToMS-LP initialises non-kNN entries to 1.0 (high_value), not 0.0.
+    - AToMS-LP uses range(1, knn) = knn-1 neighbors for the dendrogram
+      (off-by-one vs. the knn+1 search).
+    - AToMS-LP Ward's branch: undoes the /√2 buggy conversion then squares,
+      giving sq_l2² as the condensed distances rather than sq_l2/√2.
+    Fixed mode (legacy_bug=False):
+    - Non-kNN fill = 0.0, uses exactly knn neighbors, correct Hellinger.
     """
     query = prepare_faiss_vectors(topic_vectors, distance_metric)
     d = query.shape[1]
     index = faiss.IndexFlatL2(d)
     index.add(query)
     n = query.shape[0]
-    k_actual = min(knn, n - 1)
+
+    # AToMS-LP uses range(1, knn) = knn-1 neighbors for the dendrogram loop.
+    # For legacy reproduction, match that off-by-one; otherwise use full knn.
+    k_actual = min(knn - 1 if legacy_bug else knn, n - 1)
     sq_D, I = index.search(query, k_actual + 1)
     sq_D, I = sq_D[:, 1:], I[:, 1:]  # exclude self
 
-    # Convert to true metric distances (or legacy buggy distances if requested)
-    dist_vals = faiss_sq_l2_to_distance(sq_D, distance_metric, legacy_bug=legacy_bug)
+    # AToMS-LP fills non-kNN pairs with 1.0; MSTML fixed uses 0.0.
+    fill_value: float = 1.0 if legacy_bug else 0.0
+    mat = np.full((n, n), fill_value, dtype=np.float32)
+    np.fill_diagonal(mat, 0.0)
 
-    # Symmetrise into full n×n matrix
-    mat = np.zeros((n, n), dtype=np.float32)
+    # Distance values placed in the matrix:
+    #   legacy + ward + hellinger → sq_l2² (AToMS-LP Ward branch: undo /√2 then square)
+    #   legacy + other            → sq_l2/√2 (AToMS-LP buggy Hellinger)
+    #   fixed                     → sqrt(sq_l2/2) = true Hellinger (or correct cosine/euclidean)
+    if (legacy_bug
+            and linkage_method.lower() == "ward"
+            and distance_metric.lower() == "hellinger"):
+        dist_vals = sq_D.astype(np.float32) ** 2
+    else:
+        dist_vals = faiss_sq_l2_to_distance(sq_D, distance_metric, legacy_bug=legacy_bug)
+
     for i in range(n):
         for ki in range(k_actual):
             j = int(I[i, ki])
@@ -161,17 +181,24 @@ def build_topic_dendrogram(
     """Build a hierarchical clustering dendrogram over topic vectors.
 
     Uses FAISS approximate kNN (k=``knn``, default 100) to construct a sparse
-    symmetric distance matrix, then calls scipy linkage.  True metric distances
-    (via the fixed FAISS conversion) are passed directly to ``linkage`` —
-    the original AToMS-LP sqrt(2) scaling is NOT applied.
+    symmetric distance matrix, then calls scipy linkage.
+
+    Fixed mode (legacy_bug=False):
+      True Hellinger distances sqrt(sq_l2/2) are stored; non-kNN fill = 0.0;
+      exactly knn neighbours used.
+
+    Legacy mode (legacy_bug=True, hellinger + ward):
+      Reproduces AToMS-LP exactly — non-kNN fill = 1.0, knn-1 neighbours,
+      and Ward's distances = sq_l2² (AToMS-LP undoes /√2 then re-squares).
+      For non-Ward legacy: sq_l2/√2 distances, fill = 1.0.
 
     Args:
         topic_vectors:   (n_topics, vocab_size) float array.
         knn:             k for the FAISS approximate neighbour search.
         linkage_method:  Scipy linkage method ('ward' | 'complete' | 'average' | 'single').
         distance_metric: 'hellinger' | 'cosine' | 'euclidean'.
-        legacy_bug:      If True, use the original AToMS-LP FAISS conversion for
-                         exact historical reproducibility of thesis/CAMSAP 2025 results.
+        legacy_bug:      If True, replicate the original AToMS-LP dendrogram
+                         construction for exact thesis/CAMSAP 2025 reproducibility.
 
     Returns:
         (Z, min_height, max_height)
@@ -186,7 +213,10 @@ def build_topic_dendrogram(
         topic_vectors.shape[0],
     )
     if _FAISS_OK:
-        mat = _faiss_knn_distance_matrix(topic_vectors, knn, distance_metric, legacy_bug=legacy_bug)
+        mat = _faiss_knn_distance_matrix(
+            topic_vectors, knn, distance_metric,
+            legacy_bug=legacy_bug, linkage_method=linkage_method,
+        )
     else:
         log.warning("FAISS unavailable; using exact kNN fallback for dendrogram.")
         mat = _fallback_knn_distance_matrix(topic_vectors, knn, distance_metric)
@@ -231,7 +261,7 @@ def cut_dendrogram(
     labels = fcluster(Z, t=cut_dist, criterion="distance")
     n_clusters = len(np.unique(labels))
     log.info(
-        "Dendrogram cut at height=%.4f → %d meta-topic clusters.", cut_dist, n_clusters
+        "Dendrogram cut at height=%.4f -> %d meta-topic clusters.", cut_dist, n_clusters
     )
     return labels
 

@@ -26,7 +26,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import gensim.corpora as corpora
-from gensim.models import LdaMulticore
+from gensim.models import LdaModel
 from gensim.utils import simple_preprocess
 from scipy.sparse.csgraph import connected_components
 from scipy.sparse import csr_matrix
@@ -202,13 +202,13 @@ def preprocess_text(
         "Training %d-topic LDA for vocabulary reduction (lambda=%.2f, top_n=%d) …",
         vl.num_topics, vl.lam, vl.top_n,
     )
-    lda_vocab = LdaMulticore(
+    lda_vocab = LdaModel(
         corpus=corpus,
         num_topics=vl.num_topics,
         id2word=id2word,
-        workers=max(1, n_workers - 1),
         passes=3,
         random_state=42,
+        eval_every=None,
     )
 
     # Collect top-n terms per topic by relevance

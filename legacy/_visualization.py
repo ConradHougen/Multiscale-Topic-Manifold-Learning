@@ -133,7 +133,7 @@ def plot_phate_embedding(
 
     sm_c = plt.cm.ScalarMappable(cmap=cmap_c, norm=norm_c)
     sm_c.set_array([])
-    cbar_c = fig_c.colorbar(sm_c)
+    cbar_c = fig_c.colorbar(sm_c, ax=ax_c)
     cbar_c.set_label("Topic Cluster")
     path_c = fig_dir / f"{prefix}phate_cluster.pdf"
     _save(fig_c, path_c, dpi)
@@ -163,7 +163,7 @@ def plot_phate_embedding(
 
     sm_t = plt.cm.ScalarMappable(cmap="viridis", norm=plt.Normalize(vmin=0, vmax=1))
     sm_t.set_array([])
-    cbar_t = fig_t.colorbar(sm_t)
+    cbar_t = fig_t.colorbar(sm_t, ax=ax_t)
     if time_chunk_start_times is not None:
         import pandas as pd
         ticks = np.linspace(0, 1, min(10, len(time_chunk_start_times)))

@@ -42,31 +42,35 @@ legacy/
 
 ## Setup
 
-```bash
-# Core dependencies (required)
-pip install numpy pandas scipy scikit-learn networkx gensim nltk \
-            matplotlib seaborn wordcloud tqdm pyyaml
+The project uses **uv** for environment management.  All dependencies are
+declared in `pyproject.toml` and pinned in `uv.lock`.
 
-# Manifold embeddings (required for PHATE; others are optional)
-pip install phate umap-learn
+```powershell
+# Install core pipeline dependencies (numpy, scipy, gensim, FAISS, PHATE, …)
+uv sync
 
-# Approximate nearest-neighbours (strongly recommended — large speedup)
-pip install faiss-cpu
+# Add word clouds in visualisation output (optional)
+uv sync --extra notebook
 
-# BERTopic comparison experiments (required for test_comparison.py BERTopic tests)
-pip install bertopic sentence-transformers
+# Add BERTopic comparison experiments (optional — large download)
+uv sync --extra neural
 
-# Interactive visualisations (optional)
-pip install mplcursors plotly
+# Add pytest + coverage for running tests (optional)
+uv sync --extra dev
+
+# Everything at once
+uv sync --all-extras
 ```
 
-Download NLTK data once:
+Download NLTK data once (required for text preprocessing):
 
-```python
-import nltk
-nltk.download("wordnet")
-nltk.download("stopwords")
+```powershell
+uv run python -c "import nltk; nltk.download('wordnet'); nltk.download('stopwords')"
 ```
+
+> **Note on `build.py` and `conda_requirements.txt`:** these are legacy
+> artifacts from before the uv migration and should not be used.  The conda
+> environment is no longer the supported setup path.
 
 ---
 
@@ -76,38 +80,72 @@ nltk.download("stopwords")
 
 Download `arxiv-metadata-oai-snapshot.json` from
 [Kaggle arXiv Dataset](https://www.kaggle.com/datasets/Cornell-University/arxiv)
-(~4 GB JSONL).  The paper uses the snapshot dated **November 2023**.
+(~4 GB JSONL).  The CAMSAP 2025 paper used the snapshot dated **November 2023**.
 
 ### Step 2 — Run the pipeline
 
-The pipeline now defaults to the **corrected** FAISS Hellinger conversion
-(`sqrt(d/2)`). To exactly reproduce the original thesis/CAMSAP 2025 figures,
-which were generated with the original AToMS-LP code, add `--reproduce_legacy_bug`:
+Use the convenience script for your platform — it runs both variants
+(with-bug and fixed) in sequence and shares the slow stages 1–2 between them:
 
+**Windows (PowerShell):**
+```powershell
+.\run_experiments.ps1
+```
+
+**Linux / macOS:**
 ```bash
-# Corrected math (default — recommended for all new experiments)
-python -m legacy.run_pipeline \
+bash run_experiments.sh
+```
+
+Both scripts write progress to the console and to
+`experiments/arxiv/camsap2025_with_bug/pipeline_run.log` and
+`experiments/arxiv/camsap2025_fixed/pipeline_run.log`.
+
+To run a single variant manually, use `uv run python -m legacy.run_pipeline`
+directly. The pipeline defaults to the **corrected** Hellinger conversion;
+add `--reproduce_legacy_bug` for exact AToMS-LP replication:
+
+**Windows:**
+```powershell
+# Corrected math
+uv run python -m legacy.run_pipeline `
+    --input_file  arxiv-metadata-oai-snapshot.json `
+    --output_dir  ./results_camsap `
+    --categories  cs.LG stat.AP stat.CO stat.ME stat.ML stat.OT stat.TH `
+    --year_start  2012 --year_end 2023 `
+    --distance_metric hellinger --embedding_method phate `
+    --linkage_method ward --cut_height 0.68
+
+# Exact historical reproduction
+uv run python -m legacy.run_pipeline `
+    --input_file  arxiv-metadata-oai-snapshot.json `
+    --output_dir  ./results_historical `
+    --categories  cs.LG stat.AP stat.CO stat.ME stat.ML stat.OT stat.TH `
+    --year_start  2012 --year_end 2023 `
+    --distance_metric hellinger --embedding_method phate `
+    --linkage_method ward --cut_height 0.68 `
+    --reproduce_legacy_bug
+```
+
+**Linux / macOS:**
+```bash
+# Corrected math
+uv run python -m legacy.run_pipeline \
     --input_file  arxiv-metadata-oai-snapshot.json \
     --output_dir  ./results_camsap \
     --categories  cs.LG stat.AP stat.CO stat.ME stat.ML stat.OT stat.TH \
-    --year_start  2012 \
-    --year_end    2023 \
-    --distance_metric  hellinger \
-    --embedding_method phate \
-    --linkage_method   ward \
-    --cut_height       0.68
+    --year_start  2012 --year_end 2023 \
+    --distance_metric hellinger --embedding_method phate \
+    --linkage_method ward --cut_height 0.68
 
-# Exact historical reproduction of thesis/CAMSAP 2025 figures
-python -m legacy.run_pipeline \
+# Exact historical reproduction
+uv run python -m legacy.run_pipeline \
     --input_file  arxiv-metadata-oai-snapshot.json \
     --output_dir  ./results_historical \
     --categories  cs.LG stat.AP stat.CO stat.ME stat.ML stat.OT stat.TH \
-    --year_start  2012 \
-    --year_end    2023 \
-    --distance_metric  hellinger \
-    --embedding_method phate \
-    --linkage_method   ward \
-    --cut_height       0.68 \
+    --year_start  2012 --year_end 2023 \
+    --distance_metric hellinger --embedding_method phate \
+    --linkage_method ward --cut_height 0.68 \
     --reproduce_legacy_bug
 ```
 
@@ -120,8 +158,17 @@ running a variant experiment.
 
 After the pipeline completes:
 
+**Windows:**
+```powershell
+uv run python -m legacy.comparison.run_comparison `
+    --pipeline_dir  ./results_camsap `
+    --output_dir    ./results_comparison `
+    --embedding_model all-MiniLM-L6-v2
+```
+
+**Linux / macOS:**
 ```bash
-python -m legacy.comparison.run_comparison \
+uv run python -m legacy.comparison.run_comparison \
     --pipeline_dir  ./results_camsap \
     --output_dir    ./results_comparison \
     --embedding_model all-MiniLM-L6-v2
@@ -133,49 +180,147 @@ Outputs:
 
 ### Expected output files
 
+`run_experiments.ps1` (Windows) and `run_experiments.sh` (Linux/macOS) produce
+two output directories.  Stages 1–2 are run once and their artefacts are
+shared (copied) into both; stages 3–6 differ by the `--reproduce_legacy_bug` flag.
+
 ```
-results_camsap/
-├── main_df.pkl                  ← filtered + preprocessed DataFrame
-├── id2word.pkl                  ← gensim Dictionary (vocabulary)
-├── name_to_id.pkl / id_to_names.pkl  ← author disambiguation maps
-├── topic_vectors.pkl            ← (N_total_topics, vocab_size) float32
-├── ntopics_by_chunk.pkl         ← {chunk_idx: n_topics} dict
-├── inds_by_chunk.pkl            ← {chunk_idx: [doc_ids]} dict
-├── expanded_doc_topic_distns.pkl← {doc_id: (N_total_topics,) array}
-├── coauthor_graph.pkl           ← nx.Graph with edge weights
-├── author_ct_distns.pkl         ← diffused author distributions
-├── doc_ct_distns.pkl            ← diffused document distributions
-├── knn_graph.pkl                ← topic diffusion k-NN graph
-├── dendrogram_Z.pkl             ← scipy linkage matrix (N-1, 4)
-├── dendrogram_heights.pkl       ← (min_cut_height, max_cut_height) tuple
-├── cluster_labels.pkl           ← integer array of meta-topic labels
-├── distance_matrix.pkl          ← full pairwise Hellinger matrix
-├── embedding.pkl                ← (N_topics, 3) PHATE embedding
-├── author_embedding.pkl         ← {ids, embedding} — author distributions
-│                                   projected into PHATE space (PHATE only)
-├── doc_embedding.pkl            ← {ids, embedding} — document distributions
-│                                   projected into PHATE space (PHATE only)
-├── doc_scores.pkl               ← OrderedDict doc_id → entropy (desc)
-├── link_scores.pkl              ← OrderedDict (a1,a2) → score (asc)
-├── author_ranking.pkl           ← OrderedDict author_id → entropy (desc)
-├── author_ranking.csv           ← human-readable rankings
-└── figures/                     ← all generated PDFs and PNGs
+experiments/arxiv/
+├── camsap2025_with_bug/         ← RUN 1 (exact AToMS-LP / CAMSAP 2025 replication)
+│   ├── [all stage 1–2 artefacts, see below]
+│   ├── [all stage 3–6 artefacts — with legacy bug]
+│   └── pipeline_run.log
+└── camsap2025_fixed/            ← RUN 2 (corrected Hellinger distances)
+    ├── [stage 1–2 artefacts — copied from camsap2025_with_bug]
+    ├── [all stage 3–6 artefacts — without bug]
+    └── pipeline_run.log
 ```
 
-`author_embedding.pkl` and `doc_embedding.pkl` are only generated when
-`--embedding_method phate` (the default).  They reproduce the "Map Authors,
-Documents, and Author Communities to Hellinger-PHATE Embeddings" section of
-`AToMS_HRG_Longitudinal_Analysis.ipynb` by calling
-`phate_operator.transform(cross_hellinger_distance_matrix)`.
+**Stage 1 — Preprocessing** (`--skip_preprocess` to reuse)
+
+| File | Contents |
+|---|---|
+| `main_df.pkl` | Filtered + preprocessed DataFrame (docs × metadata) |
+| `id2word.pkl` | gensim `Dictionary` mapping token ID → word |
+| `name_to_id.pkl` | Author name string → canonical author ID |
+| `id_to_names.pkl` | Canonical author ID → list of name variants |
+
+**Stage 2 — Ensemble LDA** (`--skip_ensemble` to reuse)
+
+| File | Contents |
+|---|---|
+| `topic_models/model_chunk_0000.pkl` … `model_chunk_0143.pkl` | 144 monthly LDA models (Jan 2012 – Dec 2023) |
+| `topic_vectors.pkl` | `(N_total_topics, vocab_size)` float32 — stacked phi matrices |
+| `ntopics_by_chunk.pkl` | `{chunk_idx: n_topics}` — topics per month |
+| `inds_by_chunk.pkl` | `{chunk_idx: [doc_ids]}` — document indices per month |
+| `doc_topic_distns.pkl` | Raw per-chunk doc-topic distributions |
+| `expanded_doc_topic_distns.pkl` | `{doc_id: (N_total_topics,) array}` — global-index distributions |
+
+**Stage 3 — Distributions** (`--skip_distributions` to reuse; differs by bug flag)
+
+| File | Contents |
+|---|---|
+| `coauthor_graph.pkl` | `nx.Graph` — co-author edges with paper-count weights |
+| `authId_to_docs.pkl` | `{author_id: [doc_ids]}` — author → paper list |
+| `knn_graph.pkl` | Topic diffusion kNN graph (knn=5, Hellinger) |
+| `author_ct_distns.pkl` | `{author_id: (N_topics,) array}` — diffused author distributions |
+| `doc_ct_distns.pkl` | `{doc_id: (N_topics,) array}` — diffused document distributions |
+
+**Stage 4 — Manifold** (`--skip_manifold` to reuse; differs by bug flag)
+
+| File | Contents |
+|---|---|
+| `dendrogram_Z.pkl` | scipy linkage matrix `(N_topics−1, 4)` |
+| `dendrogram_heights.pkl` | `(min_h, max_h)` tuple for normalised cut height |
+| `cluster_labels.pkl` | `(N_topics,)` integer meta-topic cluster assignments |
+| `distance_matrix.pkl` | Full `(N_topics, N_topics)` pairwise Hellinger matrix |
+| `embedding.pkl` | `(N_topics, 3)` PHATE coordinates |
+| `time_labels.pkl` | `(N_topics,)` chunk index per topic (for time-coloured plot) |
+| `author_embedding.pkl` | `{ids, embedding}` — author dists projected via barycentric interpolation (PHATE only) |
+| `doc_embedding.pkl` | `{ids, embedding}` — doc dists projected via barycentric interpolation (PHATE only) |
+
+`author_embedding.pkl` and `doc_embedding.pkl` are only written when
+`--embedding_method phate`.  Projection uses barycentric interpolation
+(`mat @ topic_embedding`), not `phate_operator.transform()`.
+
+**Stage 5 — Scoring** (`--skip_scoring` to reuse; differs by bug flag)
+
+| File | Contents |
+|---|---|
+| `encoded_root.pkl` | Root `TreeNode` of the HRG binary tree |
+| `author_index_map.pkl` | `{author_id: leaf_index}` in the HRG tree |
+| `author_meta_distns.pkl` | `{author_id: (N_clusters,) array}` — meta-topic distributions |
+| `doc_scores.pkl` | `OrderedDict` `doc_id → entropy` (desc) |
+| `link_scores.pkl` | List of `(frozenset({a1, a2}), score)` (asc by surprise) |
+| `author_ranking.pkl` | `OrderedDict` `author_id → entropy` (desc) |
+| `author_ranking.csv` | Human-readable author ranking (author_id, entropy) |
+
+**Stage 6 — Visualisation** (figures saved to `figures/` subdirectory)
+
+All filenames use the prefix `hellinger_phate_` for the CAMSAP 2025 runs.
+
+| File | Contents |
+|---|---|
+| `figures/hellinger_phate_phate_cluster.pdf` | 3-D PHATE scatter coloured by meta-topic cluster |
+| `figures/hellinger_phate_phate_time.pdf` | 3-D PHATE scatter coloured by time chunk |
+| `figures/hellinger_phate_dendrogram.pdf` | Hierarchical dendrogram with cluster colouring |
+| `figures/hellinger_phate_wordcloud_cluster_1.pdf` … `_N.pdf` | One word cloud per meta-topic cluster |
+| `figures/hellinger_phate_interdiscip_docs.pdf` | Top-30 interdisciplinary documents bar chart |
+| `figures/hellinger_phate_interdiscip_authors.pdf` | Top-30 interdisciplinary authors bar chart |
+| `figures/hellinger_phate_coauthor_network.pdf` | Co-author network coloured by interdisciplinarity |
+
+The number of word cloud files equals the number of meta-topic clusters
+produced at `cut_height=0.68`.
+
+### Tracking run progress
+
+The pipeline prints timestamped INFO messages directly to the terminal as it
+runs, including stage markers `[1/6] Preprocessing …` through
+`[6/6] Generating figures …` and a `Saved ->` line for every artefact written.
+No extra monitoring needed — just watch the terminal where the script is running.
+
+The scripts also tee all output to `pipeline_run.log` in each output directory.
+To monitor from a *second* terminal while the main one is occupied:
+
+**Windows:**
+```powershell
+Get-Content -Wait experiments\arxiv\camsap2025_with_bug\pipeline_run.log
+```
+
+**Linux / macOS:**
+```bash
+tail -f experiments/arxiv/camsap2025_with_bug/pipeline_run.log
+```
+
+**Approximate timing** (arXiv 3.79 GB snapshot, 2012–2023, 7 categories):
+
+| Stage | Typical time | Notes |
+|---|---|---|
+| 1 — Preprocessing | 5–15 min | JSON parse + NLP |
+| 2 — Ensemble LDA | 2–6 hours | 144 monthly LDA models; dominant cost |
+| 3 — Distributions | 10–30 min | FAISS kNN + diffusion |
+| 4 — Manifold | 20–60 min | PHATE is the slow step |
+| 5 — Scoring | 5–15 min | |
+| 6 — Visualisation | 2–5 min | |
+
+Stage 2 artefacts are shared between runs, so RUN 2 starts at stage 3.
 
 ### Resuming a partial run
 
 Each stage saves its artefacts immediately.  Use `--skip_*` flags to restart
 from any point without rerunning earlier stages:
 
+**Windows:**
+```powershell
+uv run python -m legacy.run_pipeline [all required args] `
+    --skip_preprocess `
+    --skip_ensemble `
+    --skip_distributions
+```
+
+**Linux / macOS:**
 ```bash
-# Re-run only manifold + scoring + visualisation (skip the slow stages)
-python -m legacy.run_pipeline [all required args] \
+uv run python -m legacy.run_pipeline [all required args] \
     --skip_preprocess \
     --skip_ensemble \
     --skip_distributions
@@ -194,46 +339,46 @@ settings remain at `config.yaml` defaults.
 
 ### Different distance metrics
 
-```bash
+```powershell
 # Cosine distance
-python -m legacy.run_pipeline ... --distance_metric cosine  --output_dir ./results_cosine
+uv run python -m legacy.run_pipeline ... --distance_metric cosine  --output_dir ./results_cosine
 
 # Euclidean distance
-python -m legacy.run_pipeline ... --distance_metric euclidean --output_dir ./results_euclidean
+uv run python -m legacy.run_pipeline ... --distance_metric euclidean --output_dir ./results_euclidean
 ```
 
 ### Different embedding methods
 
-```bash
-python -m legacy.run_pipeline ... --embedding_method umap  --output_dir ./results_umap
-python -m legacy.run_pipeline ... --embedding_method tsne  --output_dir ./results_tsne
-python -m legacy.run_pipeline ... --embedding_method pca   --output_dir ./results_pca
+```powershell
+uv run python -m legacy.run_pipeline ... --embedding_method umap  --output_dir ./results_umap
+uv run python -m legacy.run_pipeline ... --embedding_method tsne  --output_dir ./results_tsne
+uv run python -m legacy.run_pipeline ... --embedding_method pca   --output_dir ./results_pca
 ```
 
 ### Different dendrogram cut heights
 
-```bash
+```powershell
 # Finer granularity (more meta-topics)
-python -m legacy.run_pipeline ... --cut_height 0.40 --output_dir ./results_fine
+uv run python -m legacy.run_pipeline ... --cut_height 0.40 --output_dir ./results_fine
 
 # Coarser granularity (fewer meta-topics)
-python -m legacy.run_pipeline ... --cut_height 0.90 --output_dir ./results_coarse
+uv run python -m legacy.run_pipeline ... --cut_height 0.90 --output_dir ./results_coarse
 ```
 
 ### BERTopic topic model (instead of LDA)
 
-```bash
-python -m legacy.run_pipeline ... --topic_model bertopic --output_dir ./results_bertopic
+```powershell
+uv run python -m legacy.run_pipeline ... --topic_model bertopic --output_dir ./results_bertopic
 ```
 
 ### Domain-specific subsets
 
-```bash
+```powershell
 # Machine learning only
-python -m legacy.run_pipeline ... --categories cs.LG --year_start 2018 --year_end 2023
+uv run python -m legacy.run_pipeline ... --categories cs.LG --year_start 2018 --year_end 2023
 
 # Statistics only
-python -m legacy.run_pipeline ... --categories stat.ML stat.ME stat.AP
+uv run python -m legacy.run_pipeline ... --categories stat.ML stat.ME stat.AP
 ```
 
 ---
@@ -361,11 +506,19 @@ $$d(A \cup B,\, C)^2 = \frac{|A|+|C|}{|A|+|B|+|C|} d(A,C)^2
 
 Geometrically, Ward linkage partitions the topic simplex into **maximally
 compact, well-separated meta-topic clusters**, each representing a coherent
-research community.  The merge heights of the resulting dendrogram are in
-true Hellinger units (after the FAISS bug fix described below), so the
-normalised cut height parameter `cut_height` ∈ [0, 1] has a direct
-information-geometric meaning: it selects the granularity at which topic
-distributions are considered distinct communities.
+research community.  In the corrected MSTML implementation, merge heights
+are in true Hellinger units, so the normalised cut height parameter
+`cut_height` ∈ [0, 1] has a direct information-geometric meaning: it
+selects the granularity at which topic distributions are considered distinct
+communities.
+
+> **AToMS-LP vs. MSTML (legacy reproduction note).** AToMS-LP's
+> dendrogram-building code has an additional bug on top of the basic FAISS
+> conversion error: it stores `sq_l2²` (≡ 4H⁴) instead of `H` in the
+> condensed distance matrix (see the [FAISS Hellinger Bug Fix](#faiss-hellinger-bug-fix)
+> section for the full derivation).  Pass `legacy_bug=True` to
+> `build_topic_dendrogram` to reproduce AToMS-LP's dendrogram exactly;
+> the default (`legacy_bug=False`) uses correct Hellinger distances.
 
 ---
 
@@ -515,10 +668,9 @@ embeddings:
 The AToMS-LP Cython source (`fast_encode_tree.pyx`) is included in
 `legacy/fast_encode_tree.pyx`.  Build it once for full Cython speed:
 
-```bash
-# From the repo root
-pip install cython numpy
-python legacy/setup.py build_ext --inplace
+```powershell
+# From the repo root (cython and numpy are already installed via uv sync)
+uv run python legacy/setup.py build_ext --inplace
 ```
 
 `_tree.py` automatically imports the compiled extension when present; it falls
@@ -531,25 +683,81 @@ faster for the tree-encoding stage.
 
 ## FAISS Hellinger Bug Fix
 
-The original AToMS-LP notebooks convert FAISS squared-L2 distances with:
+### Background: FAISS IndexFlatL2 on square-root vectors
+
+To compute Hellinger distances via FAISS, topic distributions $p$ are
+mapped to their square-root representations $v = \sqrt{p}$ before indexing.
+`IndexFlatL2` then returns the squared Euclidean distance in that space:
+
+$$\text{sq\_l2} = \|\sqrt{p} - \sqrt{q}\|^2 = 2\,H(p,q)^2$$
+
+So the true Hellinger distance is:
+
+$$H(p,q) = \sqrt{\frac{\text{sq\_l2}}{2}}$$
+
+### Bug 1 — Basic conversion error (affects all AToMS-LP distance calls)
+
+AToMS-LP converts the raw FAISS output with:
 
 ```python
-distances / np.sqrt(2)   # WRONG — gives sqrt(2)·H², not Hellinger H
+distances = sq_l2 / np.sqrt(2)    # WRONG: gives H²·√2, not H
 ```
 
-This pipeline uses the corrected formula throughout:
+**What this produces:** $\frac{\text{sq\_l2}}{\sqrt{2}} = \frac{2H^2}{\sqrt{2}} = H^2\sqrt{2}$
+
+That is neither $H$ nor $H^2$ — it is a scaled version of $H^2$.
+
+MSTML fixes this everywhere with:
 
 ```python
-np.sqrt(distances / 2.0)  # CORRECT — gives true Hellinger H ∈ [0, 1]
+distances = np.sqrt(sq_l2 / 2.0)  # CORRECT: gives true H ∈ [0, 1]
 ```
 
-**Proof.** `IndexFlatL2` on `sqrt(X)` returns `‖√p − √q‖² = 2·H(p,q)²`.
-Therefore `H(p,q) = sqrt(faiss_dist / 2)`.
+This fix is implemented in `_math.py:faiss_sq_l2_to_hellinger` and
+`_math.py:faiss_sq_l2_to_distance`, and verified by
+`test_math.py::TestFaissHellingerConversion`.
 
-The fix is implemented in `_math.py:faiss_sq_l2_to_hellinger` and verified by
-`test_math.py::TestFaissHellingerConversion::test_corrected_formula_matches_direct`
-(50 random probability pairs, max error < 1e-5) and
-`test_math.py::TestFaissHellingerConversion::test_old_formula_is_wrong`.
+### Bug 2 — Ward's dendrogram: double-conversion produces sq_l2² (AToMS-LP-specific)
+
+The AToMS-LP dendrogram-building cell applies an *additional* operation in
+the Ward's linkage branch that compounds Bug 1 into a much larger error:
+
+```python
+# Step 1 (Bug 1): convert FAISS output — intending H, but getting H²√2
+distances = sq_l2 / np.sqrt(2)           # result: H²√2 = sq_l2/√2
+
+# Step 2 (Ward branch): undo the conversion to recover sq_l2
+adjusted_distances = distances * np.sqrt(2)  # result: sq_l2
+
+# Step 3: square the result to store in the condensed matrix
+condensed_matrix[i, j] = adjusted_distances ** 2  # result: sq_l2²
+```
+
+**What AToMS-LP stores:**
+$$\text{sq\_l2}^2 = \bigl(\|\sqrt{p}-\sqrt{q}\|^2\bigr)^2 = (2H^2)^2 = 4H^4$$
+
+**What scipy's `linkage(..., method='ward')` expects:**
+Scipy takes input distances $d$, then internally computes $d^2$ as the
+Ward merge cost.  The correct input is $d = H$, so scipy uses $H^2$ — the
+geometrically valid criterion.  AToMS-LP instead passes $d = \text{sq\_l2}^2 = 4H^4$,
+so scipy uses $d^2 = 16H^8$, yielding a dendrogram whose merge heights have
+no direct relationship to Hellinger distance.
+
+**MSTML fixed implementation** passes $H = \sqrt{\text{sq\_l2}/2}$ directly
+to scipy, so all dendrogram merge heights are in true Hellinger units.
+
+**Controlled by flag:** pass `legacy_bug=True` to `build_topic_dendrogram`
+to reproduce AToMS-LP's condensed matrix (stores sq_l2²) for exact
+numerical comparison; the default `legacy_bug=False` uses correct $H$.
+
+### Summary table
+
+| Context | AToMS-LP computes | MSTML (fixed) computes |
+|---|---|---|
+| Diffusion graph kNN distances | $H^2\sqrt{2}$ (Bug 1) | $H = \sqrt{\text{sq\_l2}/2}$ |
+| Dendrogram (non-Ward) | $H^2\sqrt{2}$ (Bug 1) | $H$ |
+| Dendrogram (Ward) | $\text{sq\_l2}^2 = 4H^4$ (Bugs 1+2) | $H$ |
+| Scipy Ward merge cost | $16H^8$ | $H^2$ |
 
 ---
 
@@ -561,14 +769,13 @@ network access, no GPU required.  Every test uses synthetic data generated by
 
 ```bash
 # Run the entire legacy test suite from the repo root
-cd path/to/Multiscale-Topic-Manifold-Learning
-.venv/Scripts/pytest.exe legacy/tests/ -v
+uv run pytest legacy/tests/ -v
 
 # Run a single file
-.venv/Scripts/pytest.exe legacy/tests/test_math.py -v
+uv run pytest legacy/tests/test_math.py -v
 
 # Run with coverage report
-.venv/Scripts/pytest.exe legacy/tests/ --cov=legacy --cov-report=term-missing
+uv run pytest legacy/tests/ --cov=legacy --cov-report=term-missing
 ```
 
 Expected result: **201 passed** across all four test files.
@@ -1063,7 +1270,9 @@ arxiv-metadata-oai-snapshot.json
   │
   ▼ project_distributions_onto_embedding()   (PHATE only)
   │   cross-Hellinger distances from authors/docs to topics
-  │   → phate_operator.transform(cross_dist)
+  │   → barycentric interpolation: mat @ topic_embedding
+  │     (weighted average of PHATE topic coords; phate_operator.transform()
+  │      is not used — it requires the same data used to fit PHATE)
   │   → author_embedding (N_authors, 3), doc_embedding (N_docs, 3)
   │
   ▼ fast_encode_tree_structure() build HRG binary tree with MLE link probs
