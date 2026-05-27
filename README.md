@@ -166,7 +166,7 @@ Multiscale-Topic-Manifold-Learning/
 @phdthesis{hougen2025dissertation,
   author = {Conrad D. Hougen},
   title  = {Network Models for Learning Uncertain and Multimodal Data},
-  school = {},
+  school = {University of Michigan, Ann Arbor},
   year   = {2025}
 }
 ```
