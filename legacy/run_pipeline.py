@@ -44,7 +44,7 @@ def _save(obj, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         pickle.dump(obj, f)
-    log.info("Saved → %s", path)
+    log.info("Saved -> %s", path)
 
 
 def _load(path: Path):
@@ -204,26 +204,30 @@ def stage_manifold(args, cfg, state: dict, out: Path) -> dict:
               "embedding": embedding, "time_labels": time_labels,
               "phate_op": phate_op}
 
-    # Project author and doc distributions into embedding space (PHATE only).
-    # Reproduces "Map Authors/Documents to Hellinger-PHATE Embeddings" from
-    # AToMS_HRG_Longitudinal_Analysis.ipynb.
+    # Map author and doc distributions into embedding space via barycentric
+    # interpolation: weighted sum of topic PHATE coordinates using each
+    # author/doc's topic distribution as weights.  This matches how
+    # AToMS_HRG_Longitudinal_Analysis.ipynb overlays author trajectories on the
+    # PHATE plot (it never calls phate_operator.transform() on new data —
+    # transform() is unsupported when PHATE was fit on a precomputed distance
+    # matrix).
     if phate_op is not None:
-        log.info("[4/6] Projecting author distributions onto embedding …")
-        author_vecs = np.array(list(state["author_ct"].values()), dtype=np.float64)
+        def _barycentric_embed(distns_dict: dict) -> np.ndarray:
+            mat = np.array(list(distns_dict.values()), dtype=np.float32)
+            row_sums = mat.sum(axis=1, keepdims=True)
+            mat = mat / np.where(row_sums > 0, row_sums, 1.0)
+            return mat @ embedding  # (n_points, n_components)
+
+        log.info("[4/6] Projecting author distributions onto embedding ...")
         author_ids  = list(state["author_ct"].keys())
-        author_emb  = project_distributions_onto_embedding(
-            tvecs, author_vecs, phate_op, args.distance_metric
-        )
+        author_emb  = _barycentric_embed(state["author_ct"])
         _save({"ids": author_ids, "embedding": author_emb}, out / "author_embedding.pkl")
         result["author_emb"] = author_emb
         result["author_emb_ids"] = author_ids
 
-        log.info("[4/6] Projecting document distributions onto embedding …")
-        doc_vecs = np.array(list(state["doc_ct"].values()), dtype=np.float64)
+        log.info("[4/6] Projecting document distributions onto embedding ...")
         doc_ids  = list(state["doc_ct"].keys())
-        doc_emb  = project_distributions_onto_embedding(
-            tvecs, doc_vecs, phate_op, args.distance_metric
-        )
+        doc_emb  = _barycentric_embed(state["doc_ct"])
         _save({"ids": doc_ids, "embedding": doc_emb}, out / "doc_embedding.pkl")
         result["doc_emb"] = doc_emb
         result["doc_emb_ids"] = doc_ids

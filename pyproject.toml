@@ -1,8 +1,76 @@
 [build-system]
-requires = [
-    "setuptools>=42",
-    "wheel",
-    "cython",
-    "numpy"
-]
+requires = ["setuptools>=70", "wheel", "Cython>=3.0", "numpy>=1.26"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "mstml"
+version = "0.1.0"
+description = "Multiscale Topic Manifold Learning"
+requires-python = ">=3.10"
+dependencies = [
+    # Core scientific stack — PyPI wheels use OpenBLAS, avoiding the
+    # MKL vs MSVC-OpenMP conflict that conda-forge faiss-cpu 1.9.0 triggers.
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "scikit-learn>=1.3",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "seaborn>=0.12",
+
+    # NLP / topic modelling
+    "gensim>=4.3.3",
+    "nltk>=3.8",
+    "pyldavis>=3.4",
+
+    # Approximate nearest-neighbours (PyPI wheel bundles OpenBLAS, no MKL clash)
+    "faiss-cpu>=1.7.4",
+
+    # Manifold embedding
+    "phate>=1.0",
+
+    # Graph / network
+    "networkx>=3.0",
+    "python-louvain>=0.16",
+
+    # Misc pipeline utilities
+    "pyyaml>=6.0",
+    "tqdm>=4.65",
+    "colorcet>=3.0",
+
+    # Packaging helpers (needed by setup.py / cython extensions if any)
+    "setuptools>=70",
+    "wheel>=0.41",
+    "cython>=3.0",
+]
+
+[project.optional-dependencies]
+# Heavy neural / embedding deps — optional to keep the core install fast
+neural = [
+    "bertopic>=0.15",
+    "sentence-transformers>=2.2",
+]
+# Notebook / interactive analysis
+notebook = [
+    "jupyter>=1.0",
+    "ipykernel>=6.0",
+    "mplcursors>=0.5",
+    "wordcloud>=1.9",
+    "hypernetx>=2.0",
+    "PyPDF2>=3.0",
+    "sparse_dot_topn>=0.3",
+]
+# Testing
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "watchdog>=3.0",
+]
+
+[tool.uv]
+# Resolve from PyPI only; no conda channels involved.
+# To create the environment: uv sync
+# To run the pipeline:        uv run python -m legacy.run_pipeline ...
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["legacy*"]

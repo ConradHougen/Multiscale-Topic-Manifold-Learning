@@ -183,7 +183,7 @@ def compute_author_meta_distributions(
     truncated   = _truncate_dendrogram(root, cut_dist)
     new_leaves  = _get_new_leaf_nodes(truncated)
     n_leaves    = len(new_leaves)
-    log.info("Truncated tree at dist=%.4f → %d meta-topic leaves.", cut_dist, n_leaves)
+    log.info("Truncated tree at dist=%.4f -> %d meta-topic leaves.", cut_dist, n_leaves)
 
     author_distns: dict[int, ndarray] = {}
     for author, distn in author_ct_distns.items():

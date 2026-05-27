@@ -32,7 +32,7 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 import pandas as pd
 import gensim.corpora as corpora
-from gensim.models import LdaMulticore
+from gensim.models import LdaModel, LdaMulticore
 
 from ._config import PipelineConfig
 
@@ -95,7 +95,7 @@ class LDATopicModel:
         self.smoothing_gamma = smoothing_gamma
         self.n_workers       = n_workers if n_workers > 0 else max(1, (os.cpu_count() or 2) - 1)
         self.random_state    = random_state
-        self._lda: LdaMulticore | None = None
+        self._lda: LdaModel | LdaMulticore | None = None
         self._id2word: corpora.Dictionary | None = None
 
     # ------------------------------------------------------------------
@@ -107,14 +107,14 @@ class LDATopicModel:
         num_topics = max(4, min(n, n // max(1, self.docs_per_topic)))
 
         self._id2word = gensim_dict
-        self._lda = LdaMulticore(
+        self._lda = LdaModel(
             corpus=corpus,
             num_topics=num_topics,
             id2word=gensim_dict,
-            workers=max(1, self.n_workers - 1),
             iterations=self.ngibbs,
             passes=self.npasses,
             random_state=self.random_state,
+            eval_every=None,
         )
 
     def get_topic_vectors(self) -> np.ndarray:
