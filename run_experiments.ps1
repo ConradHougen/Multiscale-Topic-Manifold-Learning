@@ -55,8 +55,7 @@ Write-Host "==========================================================="
 Write-Host "Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Write-Host ""
 
-uv run python -m legacy.run_pipeline @COMMON --output_dir $OUT_BUG --reproduce_legacy_bug |
-    Tee-Object -FilePath "$OUT_BUG\pipeline_run.log"
+uv run python -m legacy.run_pipeline @COMMON --output_dir $OUT_BUG --reproduce_legacy_bug
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: RUN 1 failed (exit code $LASTEXITCODE). Aborting." -ForegroundColor Red
@@ -108,8 +107,7 @@ Write-Host "==========================================================="
 Write-Host "Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Write-Host ""
 
-uv run python -m legacy.run_pipeline @COMMON --output_dir $OUT_FIX --skip_preprocess --skip_ensemble |
-    Tee-Object -FilePath "$OUT_FIX\pipeline_run.log"
+uv run python -m legacy.run_pipeline @COMMON --output_dir $OUT_FIX --skip_preprocess --skip_ensemble
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: RUN 2 failed (exit code $LASTEXITCODE)." -ForegroundColor Red

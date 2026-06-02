@@ -23,6 +23,7 @@ To compile:
 
 from __future__ import annotations
 
+import gc
 import logging
 import numpy as np
 from numpy import ndarray
@@ -175,6 +176,10 @@ def fast_encode_tree_structure(
                     original_leaf_ids={i})
         for i in range(n_topics)
     }
+
+    # Free the base matrix now that leaf nodes have their own copies (~22 GB).
+    del author_topic_probs
+    gc.collect()
 
     # Precompute edge index arrays once — avoids repeated dict lookups per merge.
     _eu, _ev = [], []

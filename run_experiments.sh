@@ -60,8 +60,7 @@ echo ""
 uv run python -m legacy.run_pipeline \
     "${COMMON[@]}" \
     --output_dir "$OUT_BUG" \
-    --reproduce_legacy_bug \
-    | tee "$OUT_BUG/pipeline_run.log"
+    --reproduce_legacy_bug
 
 echo ""
 echo "RUN 1 complete: $(date '+%Y-%m-%d %H:%M:%S')"
@@ -113,8 +112,7 @@ uv run python -m legacy.run_pipeline \
     "${COMMON[@]}" \
     --output_dir "$OUT_FIX" \
     --skip_preprocess \
-    --skip_ensemble \
-    | tee "$OUT_FIX/pipeline_run.log"
+    --skip_ensemble
 
 echo ""
 echo "RUN 2 complete: $(date '+%Y-%m-%d %H:%M:%S')"

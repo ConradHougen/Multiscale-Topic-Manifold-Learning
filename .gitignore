@@ -176,9 +176,11 @@ data/
 # IDE folders
 .idea/
 
-# Specific exclusions for Cython build files after compilation
+# Cython build outputs (platform-specific, generated from .pyx)
+*.pyd
+legacy/fast_encode_tree.c
 mstml/fast_encode_tree/*.c
-mstml/fast_encode_tree/*.pyd
+build/
 
 # Exclude claude code files
 .claude/

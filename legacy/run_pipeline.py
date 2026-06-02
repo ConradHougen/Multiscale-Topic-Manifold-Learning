@@ -21,20 +21,37 @@ read from ``legacy/config.yaml`` and can be overridden with ``--config``.
 from __future__ import annotations
 
 import argparse
+import gc
 import logging
 import os
 import pickle
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
-def _setup_logging(level: str = "INFO") -> None:
-    logging.basicConfig(
-        format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-        level=getattr(logging, level.upper(), logging.INFO),
-        stream=sys.stdout,
-    )
+def _setup_logging(level: str = "INFO", output_dir: "Path | None" = None) -> None:
+    fmt      = "%(asctime)s  %(levelname)-8s  %(name)s: %(message)s"
+    datefmt  = "%H:%M:%S"
+    level_v  = getattr(logging, level.upper(), logging.INFO)
+
+    root = logging.getLogger()
+    root.setLevel(level_v)
+    root.handlers.clear()
+
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+    root.addHandler(ch)
+
+    if output_dir is not None:
+        log_dir = Path(output_dir) / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_path = log_dir / f"pipeline_{ts}.log"
+        fh = logging.FileHandler(log_path, encoding="utf-8")
+        fh.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
+        root.addHandler(fh)
+        print(f"  Log: {log_path}", flush=True)
 
 
 log = logging.getLogger("legacy.pipeline")
@@ -386,6 +403,8 @@ def main(argv=None):
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    _setup_logging(args.log_level, output_dir=out)
+
     log.info("=== MSTML legacy pipeline ===")
     log.info("  categories     : %s", args.categories)
     log.info("  years          : %d – %d", args.year_start, args.year_end)
@@ -395,77 +414,103 @@ def main(argv=None):
     log.info("  linkage        : %s", args.linkage_method)
     log.info("  cut_height     : %.3f", args.cut_height)
 
-    state: dict = {}
+    try:
+        state: dict = {}
 
-    # ── Stage 1: Preprocessing ───────────────────────────────────────────
-    if args.skip_preprocess:
-        log.info("[SKIP] Loading preprocessing artefacts …")
-        state["df"]        = _load(out / "main_df.pkl")
-        state["id2word"]   = _load(out / "id2word.pkl")
-    else:
-        log.info("[1/6] Preprocessing …")
-        state = stage_preprocess(args, cfg, out)
+        # ── Stage 1: Preprocessing ───────────────────────────────────────────
+        if args.skip_preprocess:
+            log.info("[SKIP] Loading preprocessing artefacts …")
+            state["df"]        = _load(out / "main_df.pkl")
+            state["id2word"]   = _load(out / "id2word.pkl")
+        else:
+            log.info("[1/6] Preprocessing …")
+            state = stage_preprocess(args, cfg, out)
 
-    # ── Stage 2: Ensemble topic models ───────────────────────────────────
-    if args.skip_ensemble:
-        log.info("[SKIP] Loading ensemble artefacts …")
-        state["topic_vectors"]    = _load(out / "topic_vectors.pkl")
-        state["ntopics_by_chunk"] = _load(out / "ntopics_by_chunk.pkl")
-        state["inds_by_chunk"]    = _load(out / "inds_by_chunk.pkl")
-        state["expanded"]         = _load(out / "expanded_doc_topic_distns.pkl")
-    else:
-        log.info("[2/6] Training ensemble …")
-        state = stage_ensemble(args, cfg, state, out)
+        # ── Stage 2: Ensemble topic models ───────────────────────────────────
+        if args.skip_ensemble:
+            log.info("[SKIP] Loading ensemble artefacts …")
+            state["topic_vectors"]    = _load(out / "topic_vectors.pkl")
+            state["ntopics_by_chunk"] = _load(out / "ntopics_by_chunk.pkl")
+            state["inds_by_chunk"]    = _load(out / "inds_by_chunk.pkl")
+            state["expanded"]         = _load(out / "expanded_doc_topic_distns.pkl")
+        else:
+            log.info("[2/6] Training ensemble …")
+            state = stage_ensemble(args, cfg, state, out)
 
-    # ── Stage 3: Distributions ───────────────────────────────────────────
-    if args.skip_distributions:
-        log.info("[SKIP] Loading distribution artefacts …")
-        state["coauthor_graph"] = _load(out / "coauthor_graph.pkl")
-        state["author_ct"]      = _load(out / "author_ct_distns.pkl")
-        state["doc_ct"]         = _load(out / "doc_ct_distns.pkl")
-        state["authId_to_docs"] = _load(out / "authId_to_docs.pkl")
-    else:
-        log.info("[3/6] Computing distributions …")
-        state = stage_distributions(args, cfg, state, out)
+        # Free objects not needed in stages 3–6
+        for _k in ("chunks",):
+            state.pop(_k, None)
+        gc.collect()
 
-    # ── Stage 4: Manifold ────────────────────────────────────────────────
-    if args.skip_manifold:
-        log.info("[SKIP] Loading manifold artefacts …")
-        state["Z"]              = _load(out / "dendrogram_Z.pkl")
-        state["min_h"], state["max_h"] = _load(out / "dendrogram_heights.pkl")
-        state["cluster_labels"] = _load(out / "cluster_labels.pkl")
-        state["dist_mat"]       = _load(out / "distance_matrix.pkl")
-        state["embedding"]      = _load(out / "embedding.pkl")
-        state["time_labels"]    = _load(out / "time_labels.pkl")
-        state["phate_op"]       = None  # operator not serialised; projection unavailable
-        for _key, _fname in [("author_emb", "author_embedding.pkl"),
-                              ("doc_emb", "doc_embedding.pkl")]:
-            _p = out / _fname
-            if _p.exists():
-                _blob = _load(_p)
-                state[_key] = _blob["embedding"]
-                state[f"{_key}_ids"] = _blob["ids"]
-    else:
-        log.info("[4/6] Building dendrogram and embedding …")
-        state = stage_manifold(args, cfg, state, out)
+        # ── Stage 3: Distributions ───────────────────────────────────────────
+        if args.skip_distributions:
+            log.info("[SKIP] Loading distribution artefacts …")
+            state["coauthor_graph"] = _load(out / "coauthor_graph.pkl")
+            state["author_ct"]      = _load(out / "author_ct_distns.pkl")
+            state["doc_ct"]         = _load(out / "doc_ct_distns.pkl")
+            state["authId_to_docs"] = _load(out / "authId_to_docs.pkl")
+        else:
+            log.info("[3/6] Computing distributions …")
+            state = stage_distributions(args, cfg, state, out)
 
-    # ── Stage 5: Scoring ─────────────────────────────────────────────────
-    if args.skip_scoring:
-        log.info("[SKIP] Loading scoring artefacts …")
-        state["doc_scores"]     = _load(out / "doc_scores.pkl")
-        state["link_scores"]    = _load(out / "link_scores.pkl")
-        state["author_ranking"] = _load(out / "author_ranking.pkl")
-        state["author_meta_distns"] = _load(out / "author_meta_distns.pkl")
-    else:
-        log.info("[5/6] Scoring interdisciplinarity …")
-        state = stage_scoring(args, cfg, state, out)
+        # Free objects not needed in stages 4–6 (~9.8 GB for expanded)
+        for _k in ("expanded", "inds_by_chunk"):
+            state.pop(_k, None)
+        gc.collect()
 
-    # ── Stage 6: Visualisation ───────────────────────────────────────────
-    if not args.skip_visualize:
-        log.info("[6/6] Generating figures …")
-        stage_visualize(args, cfg, state, out)
+        # ── Stage 4: Manifold ────────────────────────────────────────────────
+        if args.skip_manifold:
+            log.info("[SKIP] Loading manifold artefacts …")
+            state["Z"]              = _load(out / "dendrogram_Z.pkl")
+            state["min_h"], state["max_h"] = _load(out / "dendrogram_heights.pkl")
+            state["cluster_labels"] = _load(out / "cluster_labels.pkl")
+            state["dist_mat"]       = _load(out / "distance_matrix.pkl")
+            state["embedding"]      = _load(out / "embedding.pkl")
+            state["time_labels"]    = _load(out / "time_labels.pkl")
+            state["phate_op"]       = None  # operator not serialised; projection unavailable
+            for _key, _fname in [("author_emb", "author_embedding.pkl"),
+                                  ("doc_emb", "doc_embedding.pkl")]:
+                _p = out / _fname
+                if _p.exists():
+                    _blob = _load(_p)
+                    state[_key] = _blob["embedding"]
+                    state[f"{_key}_ids"] = _blob["ids"]
+        else:
+            log.info("[4/6] Building dendrogram and embedding …")
+            state = stage_manifold(args, cfg, state, out)
 
-    log.info("Pipeline complete. Outputs in: %s", out.resolve())
+        # Free large objects not needed in stages 5–6
+        # dist_mat: 12732×12732 float32 (~648 MB); doc_ct: diffused doc dists (~9.8 GB)
+        for _k in ("dist_mat", "phate_op", "doc_ct"):
+            state.pop(_k, None)
+        gc.collect()
+
+        # ── Stage 5: Scoring ─────────────────────────────────────────────────
+        if args.skip_scoring:
+            log.info("[SKIP] Loading scoring artefacts …")
+            state["doc_scores"]     = _load(out / "doc_scores.pkl")
+            state["link_scores"]    = _load(out / "link_scores.pkl")
+            state["author_ranking"] = _load(out / "author_ranking.pkl")
+            state["author_meta_distns"] = _load(out / "author_meta_distns.pkl")
+        else:
+            log.info("[5/6] Scoring interdisciplinarity …")
+            state = stage_scoring(args, cfg, state, out)
+
+        # Free objects not needed in stage 6
+        for _k in ("author_ct",):
+            state.pop(_k, None)
+        gc.collect()
+
+        # ── Stage 6: Visualisation ───────────────────────────────────────────
+        if not args.skip_visualize:
+            log.info("[6/6] Generating figures …")
+            stage_visualize(args, cfg, state, out)
+
+        log.info("Pipeline complete. Outputs in: %s", out.resolve())
+
+    except Exception:
+        log.exception("Pipeline failed with unhandled exception:")
+        raise
 
 
 if __name__ == "__main__":
