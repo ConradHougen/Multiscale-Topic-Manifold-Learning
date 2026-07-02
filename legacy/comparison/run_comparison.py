@@ -71,8 +71,8 @@ def run_comparison(args) -> pd.DataFrame:
     out_dir  = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── Load MSTML artefacts ─────────────────────────────────────────────
-    log.info("Loading MSTML pipeline artefacts from %s …", pipe_dir)
+    # ── Load MSTML artifacts ─────────────────────────────────────────────
+    log.info("Loading MSTML pipeline artifacts from %s …", pipe_dir)
     df              = _load(pipe_dir / "main_df.pkl")
     id2word         = _load(pipe_dir / "id2word.pkl")
     topic_vectors   = _load(pipe_dir / "topic_vectors.pkl")   # (total, vocab)

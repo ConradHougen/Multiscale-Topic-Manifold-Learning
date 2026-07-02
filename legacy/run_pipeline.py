@@ -360,7 +360,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", default=None,
                    help="Path to a YAML config override (default: legacy/config.yaml).")
     p.add_argument("--skip_preprocess",  action="store_true",
-                   help="Skip preprocessing and load saved artefacts from output_dir.")
+                   help="Skip preprocessing and load saved artifacts from output_dir.")
     p.add_argument("--skip_ensemble",    action="store_true")
     p.add_argument("--skip_distributions", action="store_true")
     p.add_argument("--skip_manifold",    action="store_true")
@@ -419,7 +419,7 @@ def main(argv=None):
 
         # ── Stage 1: Preprocessing ───────────────────────────────────────────
         if args.skip_preprocess:
-            log.info("[SKIP] Loading preprocessing artefacts …")
+            log.info("[SKIP] Loading preprocessing artifacts …")
             state["df"]        = _load(out / "main_df.pkl")
             state["id2word"]   = _load(out / "id2word.pkl")
         else:
@@ -428,7 +428,7 @@ def main(argv=None):
 
         # ── Stage 2: Ensemble topic models ───────────────────────────────────
         if args.skip_ensemble:
-            log.info("[SKIP] Loading ensemble artefacts …")
+            log.info("[SKIP] Loading ensemble artifacts …")
             state["topic_vectors"]    = _load(out / "topic_vectors.pkl")
             state["ntopics_by_chunk"] = _load(out / "ntopics_by_chunk.pkl")
             state["inds_by_chunk"]    = _load(out / "inds_by_chunk.pkl")
@@ -444,7 +444,7 @@ def main(argv=None):
 
         # ── Stage 3: Distributions ───────────────────────────────────────────
         if args.skip_distributions:
-            log.info("[SKIP] Loading distribution artefacts …")
+            log.info("[SKIP] Loading distribution artifacts …")
             state["coauthor_graph"] = _load(out / "coauthor_graph.pkl")
             state["author_ct"]      = _load(out / "author_ct_distns.pkl")
             state["doc_ct"]         = _load(out / "doc_ct_distns.pkl")
@@ -460,7 +460,7 @@ def main(argv=None):
 
         # ── Stage 4: Manifold ────────────────────────────────────────────────
         if args.skip_manifold:
-            log.info("[SKIP] Loading manifold artefacts …")
+            log.info("[SKIP] Loading manifold artifacts …")
             state["Z"]              = _load(out / "dendrogram_Z.pkl")
             state["min_h"], state["max_h"] = _load(out / "dendrogram_heights.pkl")
             state["cluster_labels"] = _load(out / "cluster_labels.pkl")
@@ -487,7 +487,7 @@ def main(argv=None):
 
         # ── Stage 5: Scoring ─────────────────────────────────────────────────
         if args.skip_scoring:
-            log.info("[SKIP] Loading scoring artefacts …")
+            log.info("[SKIP] Loading scoring artifacts …")
             state["doc_scores"]     = _load(out / "doc_scores.pkl")
             state["link_scores"]    = _load(out / "link_scores.pkl")
             state["author_ranking"] = _load(out / "author_ranking.pkl")

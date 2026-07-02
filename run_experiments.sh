@@ -8,7 +8,7 @@
 #
 # The script runs the full pipeline once with --reproduce_legacy_bug (exact
 # reproduction of thesis/CAMSAP 2025 figures), then shares the expensive
-# preprocessing and ensemble artefacts with the second run, which re-runs
+# preprocessing and ensemble artifacts with the second run, which re-runs
 # only the bug-affected stages 3-6 (distributions, manifold, scoring, viz)
 # without the flag, producing corrected results.
 #
@@ -66,13 +66,13 @@ echo ""
 echo "RUN 1 complete: $(date '+%Y-%m-%d %H:%M:%S')"
 
 # ---------------------------------------------------------------------------
-# Share preprocessing + ensemble artefacts with the fixed run
+# Share preprocessing + ensemble artifacts with the fixed run
 #   Stages 1-2 produce identical output regardless of the bug flag.
 #   The bug only affects stages 3-6 (distributions, manifold, scoring, viz).
 # ---------------------------------------------------------------------------
 
 echo ""
-echo "Copying stages 1-2 artefacts to fixed-run directory ..."
+echo "Copying stages 1-2 artifacts to fixed-run directory ..."
 
 SHARED=(
     main_df.pkl
@@ -98,7 +98,7 @@ done
 
 # ---------------------------------------------------------------------------
 # RUN 2 — without bug (corrected Hellinger distances)
-#   Skip preprocessing and ensemble (stages 1-2) since we copied the artefacts.
+#   Skip preprocessing and ensemble (stages 1-2) since we copied the artifacts.
 # ---------------------------------------------------------------------------
 
 echo ""

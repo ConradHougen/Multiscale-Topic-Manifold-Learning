@@ -181,18 +181,18 @@ Outputs:
 ### Expected output files
 
 `run_experiments.ps1` (Windows) and `run_experiments.sh` (Linux/macOS) produce
-two output directories.  Stages 1–2 are run once and their artefacts are
+two output directories.  Stages 1–2 are run once and their artifacts are
 shared (copied) into both; stages 3–6 differ by the `--reproduce_legacy_bug` flag.
 
 ```
 experiments/arxiv/
 ├── camsap2025_with_bug/         ← RUN 1 (exact AToMS-LP / CAMSAP 2025 replication)
-│   ├── [all stage 1–2 artefacts, see below]
-│   ├── [all stage 3–6 artefacts — with legacy bug]
+│   ├── [all stage 1–2 artifacts, see below]
+│   ├── [all stage 3–6 artifacts — with legacy bug]
 │   └── pipeline_run.log
 └── camsap2025_fixed/            ← RUN 2 (corrected Hellinger distances)
-    ├── [stage 1–2 artefacts — copied from camsap2025_with_bug]
-    ├── [all stage 3–6 artefacts — without bug]
+    ├── [stage 1–2 artifacts — copied from camsap2025_with_bug]
+    ├── [all stage 3–6 artifacts — without bug]
     └── pipeline_run.log
 ```
 
@@ -276,7 +276,7 @@ produced at `cut_height=0.68`.
 
 The pipeline prints timestamped INFO messages directly to the terminal as it
 runs, including stage markers `[1/6] Preprocessing …` through
-`[6/6] Generating figures …` and a `Saved ->` line for every artefact written.
+`[6/6] Generating figures …` and a `Saved ->` line for every artifact written.
 No extra monitoring needed — just watch the terminal where the script is running.
 
 The scripts also tee all output to `pipeline_run.log` in each output directory.
@@ -303,11 +303,11 @@ tail -f experiments/arxiv/camsap2025_with_bug/pipeline_run.log
 | 5 — Scoring | 5–15 min | |
 | 6 — Visualisation | 2–5 min | |
 
-Stage 2 artefacts are shared between runs, so RUN 2 starts at stage 3.
+Stage 2 artifacts are shared between runs, so RUN 2 starts at stage 3.
 
 ### Resuming a partial run
 
-Each stage saves its artefacts immediately.  Use `--skip_*` flags to restart
+Each stage saves its artifacts immediately.  Use `--skip_*` flags to restart
 from any point without rerunning earlier stages:
 
 **Windows:**
