@@ -268,7 +268,6 @@ def stage_scoring(args, cfg, state: dict, out: Path) -> dict:
         df=state["df"],
     )
 
-    _save(results["root"],               out / "encoded_root.pkl")
     _save(results["author_index_map"],   out / "author_index_map.pkl")
     _save(results["author_meta_distns"], out / "author_meta_distns.pkl")
     _save(results["doc_scores"],         out / "doc_scores.pkl")
